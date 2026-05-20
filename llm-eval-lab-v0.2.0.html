@@ -1,0 +1,3061 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LLM Eval Lab v0.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   LLM EVAL LAB v0.1
+   Single-file HTML eval harness.
+
+   ARCHITECTURE (designed to grow into a robust tool):
+     - App.registerProvider({ id, label, configFields, call })
+     - App.registerGrader({ id, label, grade })
+     - App.registerWebSearchProvider(...)   // stub for v0.4
+     - App.storage.get/set                   // localStorage today; swap later
+     - Rubric JSON format documented near SAMPLE_RUBRICS
+
+   ROADMAP:
+     v0.1 (this file): OpenRouter + LM Studio, deterministic graders, run history
+     v0.2: + Anthropic direct, LLM-as-judge grader, rubric folder loader
+     v0.3: cost tracking, CSV export, ranking dashboard
+     v0.4: web search testing, tool-call suites, NIAH slider, local folder access
+   ============================================================ */
+
+:root {
+  --bg:           #0a0a0a;
+  --bg-elev-1:   #111111;
+  --bg-elev-2:   #161616;
+  --bg-elev-3:   #1d1d1d;
+  --border:       #262626;
+  --border-strong:#3a3a3a;
+  --text:         #ece9df;
+  --text-dim:     #8a847a;
+  --text-faint:   #555049;
+  --accent:       #e8a838;
+  --accent-dim:   #5e4416;
+  --accent-glow:  rgba(232, 168, 56, 0.18);
+  --ok:           #7fb069;
+  --fail:         #d05858;
+  --info:         #5b9bd5;
+  --warn:         #e8a838;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* subtle grid background — lab instrument feel */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 48px 48px;
+  opacity: 0.25;
+  pointer-events: none;
+  z-index: 0;
+}
+
+main, header, footer { position: relative; z-index: 1; }
+
+/* ─────────── HEADER ─────────── */
+header {
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--bg-elev-1);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.brand-mark {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.brand-version {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.status-row {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  box-shadow: 0 0 0 0 var(--text-faint);
+}
+.status-dot.ok    { background: var(--ok);   box-shadow: 0 0 6px var(--ok); }
+.status-dot.fail  { background: var(--fail); box-shadow: 0 0 6px var(--fail); }
+.status-dot.warn  { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+
+/* ─────────── LAYOUT ─────────── */
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+@media (min-width: 1100px) {
+  main {
+    grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+  }
+  #panel-results { grid-column: 1 / -1; }
+  #panel-ranking { grid-column: 1 / -1; }
+  #panel-niah    { grid-column: 1 / -1; }
+  #panel-editor  { grid-column: 1 / -1; }
+}
+
+/* ─────────── EDITOR ─────────── */
+.editor-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.editor-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.editor-tests-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.test-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  padding: 10px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.test-card.dirty { border-left-color: var(--accent); }
+.test-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.test-card-head .small {
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+.test-card-actions { display: flex; gap: 4px; }
+.test-card-actions button {
+  padding: 2px 6px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.test-card-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.test-card-grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 8px;
+}
+@media (max-width: 800px) {
+  .editor-meta-grid { grid-template-columns: 1fr; }
+  .test-card-grid   { grid-template-columns: 1fr; }
+}
+.test-card-grid label.field { gap: 2px; }
+.test-card-grid .label-text { font-size: 9px; }
+.test-card-grid input,
+.test-card-grid select,
+.test-card-grid textarea { font-size: 11px; padding: 6px 8px; }
+.test-card .type-hint {
+  font-size: 9px;
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+.test-card .type-hint.bad { color: var(--fail); }
+.editor-save-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+#edit-dirty-flag.dirty { color: var(--accent); }
+.search-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.rank-row td { font-variant-numeric: tabular-nums; }
+.rank-row.top td { color: var(--text); }
+.rank-row.top .rank-pos { color: var(--accent); font-weight: 700; }
+.rank-row.dim td { color: var(--text-dim); }
+.rank-bar {
+  display: inline-block;
+  height: 6px;
+  background: var(--accent);
+  vertical-align: middle;
+  margin-right: 8px;
+  opacity: 0.75;
+}
+
+/* ─────────── NIAH BUILDER ─────────── */
+.niah-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+@media (min-width: 900px) {
+  .niah-grid { grid-template-columns: 1fr 1fr 200px; }
+}
+
+.niah-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.niah-col input[type="range"] {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--bg);
+  height: 4px;
+  border: 1px solid var(--border-strong);
+  outline: none;
+}
+.niah-col input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  cursor: pointer;
+  border: 1px solid #0a0a0a;
+}
+.niah-col input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  cursor: pointer;
+  border: 1px solid #0a0a0a;
+  border-radius: 0;
+}
+
+.niah-depth-chips { display: flex; gap: 6px; }
+.chip {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  flex: 1;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip.active {
+  background: var(--accent);
+  color: #0a0a0a;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+#panel-niah #niah-len-slider {
+  background: linear-gradient(to right, var(--accent-dim), var(--accent));
+}
+
+.niah-summary {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 12px;
+  gap: 10px;
+}
+.niah-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+.niah-stat-value {
+  font-size: 18px;
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.niah-stat-value.warn { color: var(--warn); }
+.niah-stat-value.fail { color: var(--fail); }
+
+.panel {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  cursor: default;
+  user-select: none;
+}
+
+.panel-title {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.panel-meta {
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+}
+
+.panel-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* dev-mode handle */
+body.dev .panel-header { cursor: grab; }
+body.dev .panel-header::before {
+  content: '⋮⋮';
+  color: var(--text-faint);
+  margin-right: 8px;
+  letter-spacing: -2px;
+}
+
+/* ─────────── FORM ELEMENTS ─────────── */
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+label.field .label-text {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 0;
+  outline: none;
+  transition: border-color 100ms, box-shadow 100ms;
+  width: 100%;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+
+textarea {
+  resize: vertical;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+button {
+  background: var(--bg-elev-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 100ms;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+button.primary {
+  background: var(--accent);
+  color: #0a0a0a;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+button.primary:hover:not(:disabled) {
+  background: #f0b950;
+  color: #0a0a0a;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ─────────── RUN STREAM ─────────── */
+.run-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 10px;
+}
+
+.run-line {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+  align-items: baseline;
+}
+.run-line:last-child { border-bottom: 0; }
+
+.run-status {
+  font-weight: 700;
+  font-size: 11px;
+}
+.run-status.ok   { color: var(--ok); }
+.run-status.fail { color: var(--fail); }
+.run-status.run  { color: var(--accent); }
+.run-status.err  { color: var(--fail); }
+
+.run-id { color: var(--text-dim); }
+.run-detail {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.progress {
+  width: 100%;
+  height: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+.progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  width: 0;
+  transition: width 200ms;
+}
+
+/* ─────────── RESULTS TABLE ─────────── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.table th, .table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.table th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  background: var(--bg-elev-2);
+  font-weight: 500;
+}
+.table tr.expand-row td {
+  background: var(--bg);
+  padding: 12px 16px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+}
+.pill.ok   { color: var(--ok);   border-color: var(--ok); }
+.pill.fail { color: var(--fail); border-color: var(--fail); }
+.pill.partial { color: var(--accent); border-color: var(--accent); }
+
+.test-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 80px 100px;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 11px;
+}
+.test-row:last-child { border-bottom: 0; }
+.test-row .response {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.small { font-size: 10.5px; color: var(--text-faint); }
+
+.banner {
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev-2);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.banner.warn  { border-color: var(--warn);  color: var(--warn); }
+.banner.error { border-color: var(--fail);  color: var(--fail); }
+.banner.info  { border-color: var(--info);  color: var(--info); }
+
+footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  justify-content: space-between;
+}
+
+/* dev overlay */
+#dev-copy-btn {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 100;
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="brand-mark">▣ LLM EVAL LAB</span>
+    <span class="brand-version">v0.1 · single-file harness</span>
+  </div>
+  <div class="status-row">
+    <span class="status" id="pricing-status" title="OpenRouter model pricing cache (fetched from public endpoint)">
+      <span class="status-dot"></span>PRICING · idle
+    </span>
+    <span id="status-row" style="display:flex;gap:18px;align-items:center;"></span>
+  </div>
+</header>
+
+<main id="panel-grid">
+
+  <!-- SETTINGS -->
+  <section class="panel" id="panel-settings" data-panel-id="settings">
+    <div class="panel-header">
+      <span class="panel-title">▸ PROVIDERS</span>
+      <span class="panel-meta" id="settings-meta"></span>
+    </div>
+    <div class="panel-body" id="settings-body"></div>
+  </section>
+
+  <!-- RUNNER -->
+  <section class="panel" id="panel-runner" data-panel-id="runner">
+    <div class="panel-header">
+      <span class="panel-title">▸ RUNNER</span>
+      <span class="panel-meta" id="runner-meta">idle</span>
+    </div>
+    <div class="panel-body">
+      <label class="field">
+        <span class="label-text">RUBRIC</span>
+        <select id="sel-rubric"></select>
+      </label>
+
+      <label class="field">
+        <span class="label-text">PROVIDER</span>
+        <select id="sel-provider"></select>
+      </label>
+
+      <label class="field">
+        <span class="label-text">
+          <span>MODEL</span>
+          <span id="model-hint" class="small"></span>
+        </span>
+        <input type="text" id="inp-model" placeholder="e.g. anthropic/claude-sonnet-4.5" />
+      </label>
+
+      <label class="field">
+        <span class="label-text">
+          <span>TEMPERATURE</span>
+          <span id="temp-val" class="small">0.0</span>
+        </span>
+        <input type="range" id="inp-temp" min="0" max="2" step="0.05" value="0" />
+      </label>
+
+      <label class="field">
+        <span class="label-text">SYSTEM PROMPT OVERRIDE (optional)</span>
+        <textarea id="inp-system" rows="2" placeholder="(empty = use rubric default or none)"></textarea>
+      </label>
+
+      <div class="btn-row">
+        <button class="primary" id="btn-run">▶ RUN RUBRIC</button>
+        <button class="ghost" id="btn-cancel" disabled>STOP</button>
+      </div>
+
+      <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="run-stream" id="run-stream"></div>
+    </div>
+  </section>
+
+  <!-- RUBRICS -->
+  <section class="panel" id="panel-rubrics" data-panel-id="rubrics">
+    <div class="panel-header">
+      <span class="panel-title">▸ RUBRICS</span>
+      <span class="panel-meta" id="rubric-meta"></span>
+    </div>
+    <div class="panel-body">
+      <div class="banner info" id="rubric-preview"></div>
+      <div class="banner" id="folder-status" style="display:none;"></div>
+      <div class="btn-row">
+        <button id="btn-load-folder">📁 LOAD FOLDER</button>
+        <button id="btn-refresh-folder" disabled>↻ REFRESH</button>
+        <button id="btn-forget-folder" disabled>FORGET</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-import-rubric">IMPORT JSON</button>
+        <button id="btn-export-rubric">EXPORT CURRENT</button>
+        <button id="btn-load-file">LOAD FROM FILE</button>
+      </div>
+      <textarea id="ta-rubric" rows="10" spellcheck="false" placeholder="Paste rubric JSON here to import…"></textarea>
+      <div class="small">
+        Format: <code>{ id, name, description?, system?, tests: [{ id, prompt, expected, grader, params? }] }</code>
+        — graders available: <span id="grader-list"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- NIAH BUILDER -->
+  <section class="panel" id="panel-niah" data-panel-id="niah">
+    <div class="panel-header">
+      <span class="panel-title">▸ NIAH BUILDER</span>
+      <span class="panel-meta" id="niah-meta">configure → generate → run</span>
+    </div>
+    <div class="panel-body niah-grid">
+      <div class="niah-col">
+        <label class="field">
+          <span class="label-text">
+            <span>CONTEXT LENGTH</span>
+            <span id="niah-len-val" class="small">10,000 tokens</span>
+          </span>
+          <input type="range" id="niah-len-slider" min="0" max="41" step="1" value="9" />
+          <span class="small" id="niah-len-stops">1k · 5k · 10k · 20k · 50k · 100k · 250k</span>
+        </label>
+
+        <label class="field">
+          <span class="label-text">
+            <span>DEPTH SAMPLES</span>
+            <span class="small" id="niah-depth-summary">5 depths: 10% · 30% · 50% · 70% · 90%</span>
+          </span>
+          <div class="niah-depth-chips">
+            <button class="chip" data-depth-count="1">1</button>
+            <button class="chip" data-depth-count="3">3</button>
+            <button class="chip active" data-depth-count="5">5</button>
+            <button class="chip" data-depth-count="10">10</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span class="label-text">
+            <span>MAX OUTPUT TOKENS</span>
+            <span class="small" id="niah-maxtok-val">100</span>
+          </span>
+          <input type="range" id="niah-maxtok" min="50" max="500" step="50" value="100" />
+        </label>
+      </div>
+
+      <div class="niah-col">
+        <label class="field">
+          <span class="label-text">NEEDLE (hidden fact)</span>
+          <textarea id="niah-needle" rows="2">The best place to find a quiet park in San Francisco is Bernal Heights at sunrise.</textarea>
+        </label>
+
+        <label class="field">
+          <span class="label-text">QUESTION (what to ask the model)</span>
+          <textarea id="niah-question" rows="2">What is the best place to find a quiet park in San Francisco?</textarea>
+        </label>
+
+        <label class="field">
+          <span class="label-text">EXPECTED KEYWORDS (comma-separated, all must appear)</span>
+          <input type="text" id="niah-keywords" value="Bernal Heights" />
+        </label>
+      </div>
+
+      <div class="niah-col niah-summary">
+        <div class="niah-stat">
+          <div class="niah-stat-label">TESTS</div>
+          <div class="niah-stat-value" id="niah-stat-tests">5</div>
+        </div>
+        <div class="niah-stat">
+          <div class="niah-stat-label">EST. TOKENS / TEST</div>
+          <div class="niah-stat-value" id="niah-stat-tokens">~10,000</div>
+        </div>
+        <div class="niah-stat">
+          <div class="niah-stat-label">EST. COST</div>
+          <div class="niah-stat-value" id="niah-stat-cost">—</div>
+          <div class="small" id="niah-stat-cost-note" style="margin-top:2px;">select model in RUNNER</div>
+        </div>
+        <button class="primary" id="btn-niah-generate" style="margin-top:8px;">⚙ GENERATE RUBRIC</button>
+        <div class="small" id="niah-warn" style="color:var(--warn);display:none;"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RUBRIC EDITOR -->
+  <section class="panel" id="panel-editor" data-panel-id="editor">
+    <div class="panel-header">
+      <span class="panel-title">▸ RUBRIC EDITOR</span>
+      <span class="panel-meta" id="editor-meta">no rubric loaded</span>
+    </div>
+    <div class="panel-body">
+      <div class="editor-toolbar">
+        <label class="field" style="flex:1;">
+          <span class="label-text">EDITING</span>
+          <select id="sel-edit-rubric"></select>
+        </label>
+        <div class="btn-row" style="align-self:flex-end;">
+          <button class="ghost" id="btn-edit-new">+ NEW</button>
+          <button class="ghost" id="btn-edit-clone">CLONE</button>
+          <button class="ghost" id="btn-edit-reset" title="Discard user edits and re-seed the built-in sample">↻ RESET</button>
+          <button class="ghost" id="btn-edit-delete">✕ DELETE</button>
+        </div>
+      </div>
+
+      <div class="editor-meta-grid">
+        <label class="field">
+          <span class="label-text">ID</span>
+          <input type="text" id="edit-id" />
+        </label>
+        <label class="field">
+          <span class="label-text">NAME</span>
+          <input type="text" id="edit-name" />
+        </label>
+        <label class="field" style="grid-column:1/-1;">
+          <span class="label-text">DESCRIPTION</span>
+          <input type="text" id="edit-desc" />
+        </label>
+        <label class="field" style="grid-column:1/-1;">
+          <span class="label-text">SYSTEM PROMPT (applies to all tests unless overridden per-test)</span>
+          <textarea id="edit-system" rows="2"></textarea>
+        </label>
+      </div>
+
+      <div class="editor-tests-header">
+        <span class="panel-title" style="font-size:11px;">TESTS · <span id="edit-test-count">0</span></span>
+        <button class="ghost" id="btn-edit-add-test">+ ADD TEST</button>
+      </div>
+      <div id="editor-tests"></div>
+
+      <div class="editor-save-bar">
+        <span class="small" id="edit-dirty-flag"></span>
+        <div class="btn-row">
+          <button class="ghost" id="btn-edit-revert">REVERT</button>
+          <button class="primary" id="btn-edit-save">💾 SAVE</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section class="panel" id="panel-results" data-panel-id="results">
+    <div class="panel-header">
+      <span class="panel-title">▸ RUN HISTORY</span>
+      <span class="panel-meta">
+        <button class="ghost" id="btn-csv-summary" style="padding:3px 8px;font-size:10px;">CSV · SUMMARY</button>
+        <button class="ghost" id="btn-csv-detail"  style="padding:3px 8px;font-size:10px;">CSV · DETAIL</button>
+        <button class="ghost" id="btn-export-history" style="padding:3px 8px;font-size:10px;">JSON</button>
+        <button class="ghost" id="btn-clear-history" style="padding:3px 8px;font-size:10px;">CLEAR</button>
+      </span>
+    </div>
+    <div class="panel-body" style="padding:0;">
+      <table class="table" id="tbl-history">
+        <thead>
+          <tr>
+            <th>TIMESTAMP</th>
+            <th>RUBRIC</th>
+            <th>PROVIDER</th>
+            <th>MODEL</th>
+            <th>PASS</th>
+            <th>AVG ms</th>
+            <th>TOKENS</th>
+            <th>COST</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="history-body">
+          <tr><td colspan="9" class="small" style="padding:24px;text-align:center;">no runs yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- RANKING -->
+  <section class="panel" id="panel-ranking" data-panel-id="ranking">
+    <div class="panel-header">
+      <span class="panel-title">▸ RANKING · AGGREGATED</span>
+      <span class="panel-meta">
+        <label style="font-size:10px;color:var(--text-faint);letter-spacing:.08em;">RUBRIC</label>
+        <select id="sel-rank-rubric" style="padding:2px 6px;font-size:10px;width:auto;display:inline-block;"></select>
+        <label style="font-size:10px;color:var(--text-faint);letter-spacing:.08em;margin-left:8px;">SORT</label>
+        <select id="sel-rank-sort" style="padding:2px 6px;font-size:10px;width:auto;display:inline-block;">
+          <option value="passRate">pass rate ↓</option>
+          <option value="avgCost">cost/run ↑</option>
+          <option value="avgLatency">latency ↑</option>
+          <option value="runs">runs ↓</option>
+        </select>
+      </span>
+    </div>
+    <div class="panel-body" style="padding:0;">
+      <table class="table" id="tbl-ranking">
+        <thead>
+          <tr>
+            <th style="width:40px;">#</th>
+            <th>MODEL</th>
+            <th>RUNS</th>
+            <th>TESTS</th>
+            <th>PASS RATE</th>
+            <th>AVG ms</th>
+            <th>AVG $/RUN</th>
+            <th>TOTAL $</th>
+          </tr>
+        </thead>
+        <tbody id="ranking-body">
+          <tr><td colspan="8" class="small" style="padding:24px;text-align:center;">no runs yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>▣ LOCAL / EPHEMERAL · keys stored in localStorage only</span>
+  <span id="footer-counts"></span>
+</footer>
+
+<script>
+/* ============================================================
+   PRICING — fetched from OpenRouter's public /api/v1/models endpoint.
+   LM Studio is local → cost = 0. Future providers can plug in their own table.
+   Cached 24h in localStorage.
+   ============================================================ */
+const Pricing = {
+  data: {},               // { providerId: { fetchedAt: number, models: { id: { input, output } } } }
+  TTL_MS: 24 * 60 * 60 * 1000,
+
+  hydrate(saved) { this.data = saved || {}; },
+  serialize() { return this.data; },
+
+  isStale(providerId) {
+    const p = this.data[providerId];
+    if (!p?.fetchedAt) return true;
+    return (Date.now() - p.fetchedAt) > this.TTL_MS;
+  },
+
+  async fetchOpenRouter() {
+    const res = await fetch('https://openrouter.ai/api/v1/models');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const models = {};
+    for (const m of data.data || []) {
+      if (!m.id || !m.pricing) continue;
+      const inp = parseFloat(m.pricing.prompt);
+      const out = parseFloat(m.pricing.completion);
+      if (!isNaN(inp) && !isNaN(out)) {
+        models[m.id] = { input: inp, output: out };
+      }
+    }
+    this.data.openrouter = { fetchedAt: Date.now(), models };
+    return Object.keys(models).length;
+  },
+
+  get(providerId, modelId) {
+    if (providerId === 'lmstudio') return { input: 0, output: 0 };
+    if (!modelId) return null;
+    return this.data[providerId]?.models?.[modelId] || null;
+  },
+
+  // returns { input, output, total } in USD, or null if pricing missing
+  computeCost(providerId, modelId, usage) {
+    if (!usage) return null;
+    const p = this.get(providerId, modelId);
+    if (!p) return null;
+    const promptTok = usage.prompt_tokens || 0;
+    const complTok  = usage.completion_tokens || 0;
+    const input  = promptTok * p.input;
+    const output = complTok  * p.output;
+    return { input, output, total: input + output };
+  },
+};
+
+function fmtCost(c) {
+  if (c == null || isNaN(c)) return '—';
+  if (c === 0) return '$0';
+  if (c < 0.0001) return `$${c.toExponential(1)}`;
+  if (c < 0.01)   return `$${c.toFixed(5)}`;
+  if (c < 1)      return `$${c.toFixed(4)}`;
+  return `$${c.toFixed(2)}`;
+}
+
+/* ============================================================
+   NIAH — Needle in a Haystack generator.
+   Builds rubrics that probe a model's ability to retrieve a specific
+   fact ("needle") from a large body of filler text ("haystack") at
+   configurable context lengths and depths.
+
+   Slider stops:
+     1k → 20k  (step 1k)   = 20 stops
+     25k → 100k (step 5k)  = 16 stops
+     125k → 250k (step 25k) = 6 stops
+     42 total
+   ============================================================ */
+
+const NIAH_STOPS = (() => {
+  const s = [];
+  for (let v = 1000;   v <= 20000;  v += 1000)  s.push(v);
+  for (let v = 25000;  v <= 100000; v += 5000)  s.push(v);
+  for (let v = 125000; v <= 250000; v += 25000) s.push(v);
+  return s;
+})();
+
+// Public-domain prose (pre-1923) used as filler. Mix of styles
+// reduces model pattern-matching on pure repetition.
+const NIAH_FILLER = [
+  `It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife. However little known the feelings or views of such a man may be on his first entering a neighbourhood, this truth is so well fixed in the minds of the surrounding families, that he is considered the rightful property of some one or other of their daughters. Mr. Bennet replied that he had not heard of Netherfield Park being let at last, but his wife was determined to tell him. Mrs. Long had been by that morning and told her all about it. The new tenant was a young man of large fortune from the north of England, who had come down on Monday in a chaise and four to see the place, and was so much delighted with it that he agreed with Mr. Morris immediately. He was to take possession before Michaelmas, and some of his servants were to be in the house by the end of next week.`,
+
+  `Among the numerous advantages promised by a well-constructed Union, none deserves to be more accurately developed than its tendency to break and control the violence of faction. The friend of popular governments never finds himself so much alarmed for their character and fate as when he contemplates their propensity to this dangerous vice. The instability, injustice, and confusion introduced into the public councils have in truth been the mortal diseases under which popular governments have everywhere perished. By a faction is understood a number of citizens, whether amounting to a majority or minority of the whole, who are united and actuated by some common impulse of passion, or of interest, adverse to the rights of other citizens, or to the permanent and aggregate interests of the community.`,
+
+  `It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair. We had everything before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way. In short, the period was so far like the present period that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of comparison only. There were a king with a large jaw and a queen with a plain face on the throne of England; there were a king with a large jaw and a queen with a fair face on the throne of France.`,
+
+  `I went to the woods because I wished to live deliberately, to front only the essential facts of life, and see if I could not learn what it had to teach, and not, when I came to die, discover that I had not lived. I did not wish to live what was not life, living is so dear; nor did I wish to practise resignation, unless it was quite necessary. I wanted to live deep and suck out all the marrow of life, to live so sturdily and Spartan-like as to put to rout all that was not life, to cut a broad swath and shave close, to drive life into a corner, and reduce it to its lowest terms. Our life is frittered away by detail. Simplify, simplify. Instead of three meals a day, if it be necessary eat but one.`,
+
+  `Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal. Now we are engaged in a great civil war, testing whether that nation, or any nation so conceived and so dedicated, can long endure. We are met on a great battle-field of that war. We have come to dedicate a portion of that field, as a final resting place for those who here gave their lives that that nation might live. It is altogether fitting and proper that we should do this. But, in a larger sense, we can not dedicate, we can not consecrate, we can not hallow this ground.`,
+
+  `Society in every state is a blessing, but Government, even in its best state, is but a necessary evil; in its worst state an intolerable one; for when we suffer, or are exposed to the same miseries by a Government, which we might expect in a country without Government, our calamity is heightened by reflecting that we furnish the means by which we suffer. Government, like dress, is the badge of lost innocence; the palaces of kings are built upon the ruins of the bowers of paradise. For were the impulses of conscience clear, uniform, and irresistibly obeyed, man would need no other lawgiver; but that not being the case, he finds it necessary to surrender up a part of his property to furnish means for the protection of the rest.`,
+
+  `The bee is more honored than other animals, not because she labors, but because she labors for others. When a man has reached a condition in which he believes that a thing must happen because he does not wish it, and that what he wishes to happen can never be, this is what is called desperation. The hour will come when, by an irresistible law, those who have struck the iron will themselves be struck. The harvest is always the same, whether it be sown by tyrants or by free men: each must reap as he has sown. The traveler in distant lands learns that the world contains many shapes of error and many shapes of truth, and that the customs of his own country are not the measure of all human worth.`,
+
+  `Whenever I find myself growing grim about the mouth; whenever it is a damp, drizzly November in my soul; whenever I find myself involuntarily pausing before coffin warehouses, and bringing up the rear of every funeral I meet; and especially whenever my hypos get such an upper hand of me, that it requires a strong moral principle to prevent me from deliberately stepping into the street, and methodically knocking people's hats off—then, I account it high time to get to sea as soon as I can. This is my substitute for pistol and ball. With a philosophical flourish Cato throws himself upon his sword; I quietly take to the ship. There is nothing surprising in this.`,
+];
+
+const Niah = {
+  // Seeded RNG so the same (length, depth) always yields the same haystack
+  // — important for reproducible evals across runs.
+  rng(seed) {
+    let s = seed | 0 || 1;
+    return () => {
+      s = (s * 9301 + 49297) % 233280;
+      return s / 233280;
+    };
+  },
+
+  shuffle(arr, rng) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  },
+
+  // ~4 chars per token, English prose. Approximate, off by 10-30% vs tiktoken,
+  // but good enough for slider targets. Pluggable: swap for tiktoken-WASM later.
+  tokenize(text) { return Math.ceil(text.length / 4); },
+  tokensToChars(tokens) { return tokens * 4; },
+
+  buildHaystack(targetTokens, seed = 1234) {
+    const targetChars = this.tokensToChars(targetTokens);
+    const rng = this.rng(seed);
+    const parts = [];
+    let total = 0;
+    let section = 0;
+    while (total < targetChars) {
+      section++;
+      const header = `\n\n— Section ${section} —\n\n`;
+      parts.push(header);
+      total += header.length;
+      const order = this.shuffle(NIAH_FILLER, rng);
+      for (const p of order) {
+        const block = p + '\n\n';
+        parts.push(block);
+        total += block.length;
+        if (total >= targetChars) break;
+      }
+    }
+    return parts.join('').slice(0, targetChars);
+  },
+
+  // Insert needle near the target depth%, snapped to next paragraph break.
+  insertNeedle(haystack, needle, depthPct) {
+    const target = Math.floor(haystack.length * (depthPct / 100));
+    let cut = haystack.indexOf('\n\n', target);
+    if (cut === -1) cut = haystack.length;
+    return haystack.slice(0, cut) + '\n\n' + needle + '\n\n' + haystack.slice(cut);
+  },
+
+  // Estimate cost for the rubric using current pricing.
+  // Returns { perTest, total, known } in USD.
+  estimateCost(providerId, model, contextTokens, outputTokens, testCount) {
+    const price = Pricing.get(providerId, model);
+    if (!price) return { perTest: null, total: null, known: false };
+    const perTest = contextTokens * price.input + outputTokens * price.output;
+    return { perTest, total: perTest * testCount, known: true };
+  },
+
+  buildRubric({ contextTokens, depths, needle, question, keywords, maxTokens = 100, seed = 1234 }) {
+    const tests = [];
+    const haystackBase = this.buildHaystack(contextTokens, seed);
+    for (const depth of depths) {
+      const withNeedle = this.insertNeedle(haystackBase, needle, depth);
+      const prompt = `Read the following text carefully.\n\n${withNeedle}\n\n---\n\nBased on the text above, answer this question:\n\n${question}`;
+      tests.push({
+        id: `niah_${contextTokens}_d${depth}`,
+        prompt,
+        expected: keywords.length === 1 ? keywords[0] : keywords,
+        grader: 'contains',
+        params: { caseSensitive: false, mode: 'all' },
+        max_tokens: maxTokens,
+        _meta: { type: 'niah', contextTokens, depth, keywords },
+      });
+    }
+    const lenLabel = contextTokens >= 1000 ? `${(contextTokens/1000).toFixed(contextTokens >= 10000 ? 0 : 1)}k` : `${contextTokens}`;
+    return {
+      id: `niah_${contextTokens}_${depths.length}d_${Date.now().toString(36)}`,
+      name: `NIAH · ${lenLabel} · ${depths.length}d`,
+      description: `Needle: "${needle.slice(0, 80)}${needle.length > 80 ? '…' : ''}"`,
+      tests,
+      _user: true,
+      _niah: true,
+    };
+  },
+};
+
+/* ============================================================
+   IDB — tiny key/value wrapper for FileSystemDirectoryHandle persistence
+   (localStorage can't store handles; IDB can)
+   ============================================================ */
+const idb = {
+  _db: null,
+  open() {
+    if (this._db) return Promise.resolve(this._db);
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('llm-eval-lab', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => { this._db = r.result; res(this._db); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async get(k) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const r = db.transaction('kv','readonly').objectStore('kv').get(k);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async set(k, v) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('kv','readwrite');
+      tx.objectStore('kv').put(v, k);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  },
+  async del(k) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('kv','readwrite');
+      tx.objectStore('kv').delete(k);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  },
+};
+
+/* ============================================================
+   CORE APP
+   ============================================================ */
+const App = {
+  providers: new Map(),
+  graders: new Map(),
+  rubrics: [],
+  config: {},      // per-provider config (api keys, urls) + __judge (judge config)
+  history: [],     // completed runs
+  current: null,   // active run controller
+  folderHandle: null,           // FileSystemDirectoryHandle when a rubric folder is loaded
+  folderHandlePending: false,   // true when handle exists but permission needs re-grant
+
+  storage: {
+    KEY: 'llm-eval-lab.v0.1',
+    load() {
+      try { return JSON.parse(localStorage.getItem(this.KEY) || '{}'); }
+      catch { return {}; }
+    },
+    save(data) {
+      localStorage.setItem(this.KEY, JSON.stringify(data));
+    },
+  },
+
+  registerProvider(p) {
+    /* Provider contract:
+       {
+         id:           string (stable key)
+         label:        string (display name)
+         configFields: [{ key, label, type: 'text'|'password', default?, required? }]
+         call:         async ({ model, messages, temperature, max_tokens }, providerConfig)
+                       returns { text, usage, latency_ms, raw }
+         healthCheck:  optional async (providerConfig) -> { ok: bool, detail: string }
+       }
+    */
+    this.providers.set(p.id, p);
+  },
+
+  registerGrader(g) {
+    /* Grader contract:
+       {
+         id:    string
+         label: string
+         grade: (actualText, expectedValue, params?, ctx?) -> { pass, score, reason }
+                ctx provides: testId, prompt, systemPrompt, callJudge(messages)
+       }
+    */
+    this.graders.set(g.id, g);
+  },
+
+  searchProviders: new Map(),
+  registerSearchProvider(p) {
+    /* Search provider contract:
+       {
+         id:           string
+         label:        string
+         configFields: [{ key, label, type, required? }]
+         search:       async (query, opts, cfg) -> [{ title, url, snippet }]
+                       opts: { topK }
+       }
+    */
+    this.searchProviders.set(p.id, p);
+  },
+
+  // ── Stubs reserved for v0.5+ ─────────────────────────────
+  registerLocalFolderAdapter(_) { /* TODO future */ },
+};
+
+/* ============================================================
+   PROVIDERS
+   Both v0.1 providers speak OpenAI-compatible chat completions.
+   Adding Anthropic direct / Google AI / Ollama is the same shape.
+   ============================================================ */
+async function openaiCompatibleCall({ url, apiKey, model, messages, temperature, max_tokens, extraHeaders }) {
+  const start = performance.now();
+  const headers = { 'Content-Type': 'application/json', ...(extraHeaders || {}) };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+  const body = { model, messages, temperature };
+  if (max_tokens) body.max_tokens = max_tokens;
+
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const latency_ms = Math.round(performance.now() - start);
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  return {
+    text: data.choices?.[0]?.message?.content ?? '',
+    usage: data.usage ?? null,
+    latency_ms,
+    raw: data,
+  };
+}
+
+App.registerProvider({
+  id: 'openrouter',
+  label: 'OpenRouter',
+  configFields: [
+    { key: 'apiKey', label: 'API Key', type: 'password', required: true },
+  ],
+  modelHint: 'e.g. anthropic/claude-sonnet-4.5, openai/gpt-4o, meta-llama/llama-3.3-70b',
+  call: ({ model, messages, temperature, max_tokens }, cfg) =>
+    openaiCompatibleCall({
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      apiKey: cfg.apiKey,
+      model, messages, temperature, max_tokens,
+      extraHeaders: {
+        'HTTP-Referer': window.location.href || 'http://localhost',
+        'X-Title': 'LLM Eval Lab',
+      },
+    }),
+  healthCheck: async (cfg) => {
+    if (!cfg.apiKey) return { ok: false, detail: 'no api key' };
+    return { ok: true, detail: 'key present' };
+  },
+});
+
+App.registerProvider({
+  id: 'lmstudio',
+  label: 'LM Studio (local)',
+  configFields: [
+    { key: 'baseUrl', label: 'Base URL', type: 'text', default: 'http://localhost:1234' },
+  ],
+  modelHint: 'model id loaded in LM Studio, or leave blank for default',
+  call: ({ model, messages, temperature, max_tokens }, cfg) => {
+    const base = (cfg.baseUrl || 'http://localhost:1234').replace(/\/$/, '');
+    return openaiCompatibleCall({
+      url: `${base}/v1/chat/completions`,
+      model: model || 'local-model',
+      messages, temperature, max_tokens,
+    });
+  },
+  healthCheck: async (cfg) => {
+    const base = (cfg.baseUrl || 'http://localhost:1234').replace(/\/$/, '');
+    try {
+      const res = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(2000) });
+      if (!res.ok) return { ok: false, detail: `HTTP ${res.status}` };
+      const data = await res.json();
+      const count = data.data?.length || 0;
+      return { ok: true, detail: `${count} model(s) loaded` };
+    } catch (e) {
+      return { ok: false, detail: 'unreachable' };
+    }
+  },
+});
+
+/* ============================================================
+   GRADERS
+   Each returns { pass: bool, score: 0..1, reason: string }
+   ============================================================ */
+function stripFences(s) {
+  return String(s).trim().replace(/^```(?:json|javascript|js|python|py)?\s*\n?/i, '').replace(/```\s*$/, '').trim();
+}
+
+function sortKeys(obj) {
+  if (Array.isArray(obj)) return obj.map(sortKeys);
+  if (obj && typeof obj === 'object') {
+    return Object.keys(obj).sort().reduce((acc, k) => (acc[k] = sortKeys(obj[k]), acc), {});
+  }
+  return obj;
+}
+
+App.registerGrader({
+  id: 'exact',
+  label: 'Exact match',
+  grade: (actual, expected, params = {}) => {
+    let a = String(actual).trim();
+    let e = String(expected).trim();
+    if (!params.caseSensitive) { a = a.toLowerCase(); e = e.toLowerCase(); }
+    const pass = a === e;
+    return { pass, score: pass ? 1 : 0, reason: pass ? 'exact match' : `got: "${a.slice(0,60)}" | expected: "${e.slice(0,60)}"` };
+  },
+});
+
+App.registerGrader({
+  id: 'contains',
+  label: 'Contains substring(s)',
+  // expected: string OR array of strings
+  // params.mode: 'all' (default for arrays) | 'any'
+  // params.caseSensitive: bool
+  grade: (actual, expected, params = {}) => {
+    let a = String(actual);
+    if (!params.caseSensitive) a = a.toLowerCase();
+    const needles = (Array.isArray(expected) ? expected : [expected]).map(String);
+    const norm = needles.map(n => params.caseSensitive ? n : n.toLowerCase());
+    const hits = norm.filter(n => a.includes(n));
+    const mode = params.mode || (needles.length > 1 ? 'all' : 'all');
+    if (mode === 'any') {
+      const pass = hits.length > 0;
+      return { pass, score: pass ? 1 : 0, reason: pass ? `found "${hits[0]}"` : `none of ${needles.length} found` };
+    }
+    const pass = hits.length === needles.length;
+    const score = needles.length ? hits.length / needles.length : 0;
+    return { pass, score, reason: pass ? `all ${needles.length} found` : `${hits.length}/${needles.length} found` };
+  },
+});
+
+App.registerGrader({
+  id: 'regex',
+  label: 'Regex match',
+  grade: (actual, pattern, params = {}) => {
+    try {
+      const re = new RegExp(pattern, params.flags || '');
+      const pass = re.test(String(actual));
+      return { pass, score: pass ? 1 : 0, reason: pass ? `/${pattern}/${params.flags||''} matched` : `/${pattern}/${params.flags||''} did NOT match` };
+    } catch (e) {
+      return { pass: false, score: 0, reason: `bad regex: ${e.message}` };
+    }
+  },
+});
+
+App.registerGrader({
+  id: 'starts-with',
+  label: 'Starts with',
+  grade: (actual, expected, params = {}) => {
+    let a = String(actual).trim();
+    let e = String(expected);
+    if (!params.caseSensitive) { a = a.toLowerCase(); e = e.toLowerCase(); }
+    const pass = a.startsWith(e);
+    return { pass, score: pass ? 1 : 0, reason: pass ? 'starts with' : `starts with: "${a.slice(0,40)}…"` };
+  },
+});
+
+App.registerGrader({
+  id: 'numeric',
+  label: 'Numeric (with tolerance)',
+  grade: (actual, expected, params = {}) => {
+    const tol = params.tolerance ?? 0;
+    const match = String(actual).match(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/);
+    if (!match) return { pass: false, score: 0, reason: `no number parsed from "${String(actual).slice(0,40)}"` };
+    const a = parseFloat(match[0]);
+    const e = parseFloat(expected);
+    const diff = Math.abs(a - e);
+    const pass = diff <= tol;
+    return { pass, score: pass ? 1 : 0, reason: pass ? `${a} ≈ ${e} (Δ ${diff})` : `${a} vs ${e} (Δ ${diff} > ${tol})` };
+  },
+});
+
+App.registerGrader({
+  id: 'json-equal',
+  label: 'JSON deep equal',
+  grade: (actual, expected, params = {}) => {
+    try {
+      const aStr = stripFences(actual);
+      const a = JSON.parse(aStr);
+      const e = typeof expected === 'string' ? JSON.parse(expected) : expected;
+      const pass = JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(e));
+      return { pass, score: pass ? 1 : 0, reason: pass ? 'json equal' : `json differs: got ${JSON.stringify(a).slice(0,80)}` };
+    } catch (err) {
+      return { pass: false, score: 0, reason: `parse error: ${err.message}` };
+    }
+  },
+});
+
+App.registerGrader({
+  id: 'length',
+  label: 'Length constraint',
+  grade: (actual, _expected, params = {}) => {
+    const len = String(actual).length;
+    const { min, max } = params;
+    if (min != null && len < min) return { pass: false, score: 0, reason: `length ${len} < min ${min}` };
+    if (max != null && len > max) return { pass: false, score: 0, reason: `length ${len} > max ${max}` };
+    return { pass: true, score: 1, reason: `length ${len} ok` };
+  },
+});
+
+// LLM-as-judge — calls a configured judge model to score the response.
+// Reads judge config from App.config.__judge.
+// Params:
+//   criteria   (string, required) — what makes a good response
+//   reference  (string, optional) — ideal/reference answer
+//   threshold  (number, default 0.7) — score >= threshold to pass
+//   rubric     (string, optional) — explicit scoring rubric text
+App.registerGrader({
+  id: 'llm-judge',
+  label: 'LLM-as-judge',
+  grade: async (actual, _expected, params = {}, ctx = {}) => {
+    if (!params.criteria) {
+      return { pass: false, score: 0, reason: 'llm-judge requires params.criteria' };
+    }
+    if (!ctx.callJudge) {
+      return { pass: false, score: 0, reason: 'llm-judge: no judge configured (set Judge in PROVIDERS panel)' };
+    }
+    const threshold = params.threshold ?? 0.7;
+
+    const judgeSystem = `You are an impartial evaluator. You score an assistant's response against criteria.
+Respond with ONLY a JSON object, no markdown fences, no commentary:
+{"pass": <true|false>, "score": <number 0.0 to 1.0>, "reason": "<one sentence>"}`;
+
+    const userMsg = [
+      `CRITERIA:\n${params.criteria}`,
+      params.rubric ? `SCORING RUBRIC:\n${params.rubric}` : null,
+      params.reference ? `REFERENCE ANSWER:\n${params.reference}` : null,
+      `ORIGINAL PROMPT:\n${ctx.prompt || '(not provided)'}`,
+      `ASSISTANT RESPONSE:\n${actual}`,
+      `Score the assistant response. pass=true only if score >= ${threshold}.`,
+    ].filter(Boolean).join('\n\n');
+
+    try {
+      const judgeText = await ctx.callJudge([
+        { role: 'system', content: judgeSystem },
+        { role: 'user',   content: userMsg },
+      ]);
+
+      const cleaned = stripFences(judgeText);
+      // extract the first {...} block defensively
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      const obj = JSON.parse(m ? m[0] : cleaned);
+      const score = Math.max(0, Math.min(1, Number(obj.score) || 0));
+      const pass = obj.pass === true && score >= threshold;
+      return { pass, score, reason: `judge: ${obj.reason || '(no reason)'} [score ${score.toFixed(2)} thr ${threshold}]` };
+    } catch (e) {
+      return { pass: false, score: 0, reason: `judge parse error: ${e.message}` };
+    }
+  },
+});
+
+/* ============================================================
+   SEARCH PROVIDERS
+   Each returns a normalized array of { title, url, snippet }.
+   Config is stored under App.config.__searchProviders[id].
+   Adding Google Custom Search, SerpAPI, Exa, etc. follows the same shape.
+   ============================================================ */
+
+App.registerSearchProvider({
+  id: 'tavily',
+  label: 'Tavily',
+  configFields: [
+    { key: 'apiKey', label: 'API Key', type: 'password', required: true },
+  ],
+  search: async (query, opts = {}, cfg = {}) => {
+    if (!cfg.apiKey) throw new Error('Tavily: no API key configured');
+    const res = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: cfg.apiKey,
+        query,
+        search_depth: opts.depth || 'basic',
+        max_results: opts.topK || 5,
+        include_answer: false,
+      }),
+    });
+    if (!res.ok) throw new Error(`Tavily HTTP ${res.status}: ${(await res.text()).slice(0,160)}`);
+    const data = await res.json();
+    return (data.results || []).map(r => ({
+      title:   r.title   || '(untitled)',
+      url:     r.url     || '',
+      snippet: r.content || '',
+    }));
+  },
+});
+
+App.registerSearchProvider({
+  id: 'brave',
+  label: 'Brave Search',
+  configFields: [
+    { key: 'apiKey', label: 'API Key', type: 'password', required: true },
+  ],
+  search: async (query, opts = {}, cfg = {}) => {
+    if (!cfg.apiKey) throw new Error('Brave: no API key configured');
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${opts.topK || 5}`;
+    const res = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'X-Subscription-Token': cfg.apiKey,
+      },
+    });
+    if (!res.ok) throw new Error(`Brave HTTP ${res.status}: ${(await res.text()).slice(0,160)}`);
+    const data = await res.json();
+    return (data.web?.results || []).map(r => ({
+      title:   r.title       || '(untitled)',
+      url:     r.url         || '',
+      snippet: r.description || '',
+    }));
+  },
+});
+
+/* ============================================================
+   SAMPLE RUBRICS
+   Drop additional rubrics here — or paste JSON in the rubric panel.
+
+   RUBRIC SCHEMA:
+   {
+     id: string                       unique id
+     name: string                     display name
+     description?: string             optional summary
+     system?: string                  optional system prompt for all tests
+     tests: [
+       {
+         id: string                   unique within rubric
+         prompt: string               user message
+         expected: any                grader-specific (string | regex | object | number | array)
+         grader: string               id from App.graders
+         params?: object              grader-specific options
+         system?: string              optional per-test override
+         max_tokens?: number          optional cap
+         search?: {                   optional — pre-fetch search results and inject
+           provider?: string          id from App.searchProviders (default: first configured)
+           query?: string             search query (default: the prompt text)
+           topK?: number              max results (default 5)
+           depth?: 'basic'|'advanced' Tavily-only (default basic)
+         }
+       }
+     ]
+   }
+   ============================================================ */
+const SAMPLE_RUBRICS = [
+  {
+    id: 'basic-sanity',
+    name: 'Basic Sanity',
+    description: 'Smoke test — math, facts, format compliance, JSON.',
+    tests: [
+      { id: 'arith',     prompt: 'What is 17 * 23? Respond with only the integer, no other text.', expected: '391', grader: 'exact' },
+      { id: 'capital',   prompt: 'What is the capital of Australia? Respond with only the city name.', expected: 'Canberra', grader: 'exact', params: { caseSensitive: false } },
+      { id: 'sqrt',      prompt: 'What is the positive square root of 144? Respond with only the integer.', expected: '12', grader: 'numeric', params: { tolerance: 0.01 } },
+      { id: 'json',      prompt: 'Return a JSON object with keys "name" and "age" for a person named Alice who is 30. Respond with only the JSON, no markdown fences, no other text.', expected: { name: 'Alice', age: 30 }, grader: 'json-equal' },
+      { id: 'regex-fmt', prompt: 'List the first three planets from the Sun. Format as exactly:\n1. <planet>\n2. <planet>\n3. <planet>\nand nothing else.', expected: '^1\\.\\s*Mercury\\s*\\n2\\.\\s*Venus\\s*\\n3\\.\\s*Earth\\s*$', grader: 'regex', params: { flags: 'i' } },
+    ],
+  },
+  {
+    id: 'instruction-following',
+    name: 'Instruction Following',
+    description: 'No-preamble compliance, format adherence, length bounds.',
+    tests: [
+      { id: 'echo',         prompt: 'Respond with exactly the two words: hello world\nNo quotes, no punctuation, nothing else.', expected: 'hello world', grader: 'exact', params: { caseSensitive: false } },
+      { id: 'ready',        prompt: 'Respond with only the single word: ready', expected: 'ready', grader: 'exact', params: { caseSensitive: false } },
+      { id: 'starts-yn',   prompt: 'Is the chemical symbol for gold "Au"? Begin your response with the word "Yes" or "No", followed by anything else you want to add.', expected: '^(yes|no)\\b', grader: 'regex', params: { flags: 'i' } },
+      { id: 'short-answer', prompt: 'Summarize the theory of relativity in 60 characters or less.', expected: null, grader: 'length', params: { min: 5, max: 60 } },
+    ],
+  },
+  {
+    id: 'coding-python-basic',
+    name: 'Coding — Python Output Prediction',
+    description: 'Predict the printed output of small Python snippets.',
+    system: 'You are an expert Python developer. When asked to predict output, respond with ONLY the printed value, no explanation.',
+    tests: [
+      { id: 'sum',     prompt: 'What does this print?\n```python\nprint(sum([1, 2, 3, 4, 5]))\n```', expected: '15', grader: 'exact' },
+      { id: 'neg-idx', prompt: 'What does this print?\n```python\nx = [10, 20, 30]\nprint(x[-1])\n```', expected: '30', grader: 'exact' },
+      { id: 'len-str', prompt: 'What does this print?\n```python\nprint(len("hello world"))\n```', expected: '11', grader: 'exact' },
+      { id: 'dict',    prompt: 'What does this print?\n```python\nd = {"a": 1, "b": 2}\nprint(d.get("c", 99))\n```', expected: '99', grader: 'exact' },
+    ],
+  },
+  {
+    id: 'judged-quality',
+    name: 'Judged — Open-Ended Quality',
+    description: 'Open-ended tasks scored by the configured judge model.',
+    tests: [
+      {
+        id: 'haiku',
+        prompt: 'Write a haiku about debugging code. Respond with only the haiku, three lines, no preamble.',
+        grader: 'llm-judge',
+        params: {
+          criteria: 'Response is exactly 3 lines. Roughly follows 5-7-5 syllable pattern (small deviation acceptable). Theme relates to debugging, errors, or programming. No preamble or commentary.',
+          threshold: 0.7,
+        },
+      },
+      {
+        id: 'concise-explain',
+        prompt: 'Explain what a hash table is in two sentences for a junior developer.',
+        grader: 'llm-judge',
+        params: {
+          criteria: 'Two sentences (one or three is a fail). Mentions key-value lookup. Mentions O(1) average access OR the hashing concept. Clear language suitable for a junior developer.',
+          threshold: 0.7,
+        },
+      },
+      {
+        id: 'rewrite',
+        prompt: 'Rewrite this to be clearer and more concise:\n"The thing that I was going to maybe possibly do today, although I am not 100% sure about it, is to potentially refactor the user authentication code."',
+        grader: 'llm-judge',
+        params: {
+          criteria: 'Substantially shorter than the original (under 15 words). Removes hedging words like "maybe", "possibly", "potentially", "not 100% sure". Preserves the core meaning (refactor auth code, today). Reads naturally.',
+          threshold: 0.7,
+        },
+      },
+    ],
+  },
+  {
+    id: 'search-augmented',
+    name: 'Search-Augmented · Current Info',
+    description: 'Pre-fetches web results and tests whether the model uses them. Requires a configured search provider (Tavily or Brave).',
+    tests: [
+      {
+        id: 'btc-price',
+        prompt: 'Based on the search results above, what is the approximate current price of Bitcoin in USD? Respond with the numeric price.',
+        search: { query: 'current bitcoin price USD', topK: 3 },
+        expected: '\\$?\\d{2,3}[,.]?\\d{3}',
+        grader: 'regex',
+        params: { flags: '' },
+      },
+      {
+        id: 'who-anthropic-ceo',
+        prompt: 'Based on the search results above, who is the CEO of Anthropic? Respond with only the full name.',
+        search: { query: 'CEO of Anthropic', topK: 5 },
+        expected: ['Dario', 'Amodei'],
+        grader: 'contains',
+        params: { caseSensitive: false, mode: 'all' },
+      },
+      {
+        id: 'recent-anthropic',
+        prompt: 'Based on the search results above, summarize in exactly one sentence what Anthropic announced most recently.',
+        search: { query: 'Anthropic announcement 2026', topK: 5 },
+        grader: 'llm-judge',
+        params: {
+          criteria: 'Response is exactly one sentence. Mentions Anthropic specifically. References specific details from the search results, not generic statements.',
+          threshold: 0.7,
+        },
+      },
+    ],
+  },
+];
+
+/* ============================================================
+   RUN ENGINE
+   ============================================================ */
+function pickSearchProvider(preferredId) {
+  if (preferredId && App.searchProviders.has(preferredId)) {
+    const cfg = (App.config.__searchProviders || {})[preferredId] || {};
+    if (cfg.apiKey) return App.searchProviders.get(preferredId);
+  }
+  // fall back to first configured
+  for (const sp of App.searchProviders.values()) {
+    const cfg = (App.config.__searchProviders || {})[sp.id] || {};
+    if (cfg.apiKey) return sp;
+  }
+  return null;
+}
+
+async function runRubric({ rubric, providerId, model, temperature, systemOverride }) {
+  const provider = App.providers.get(providerId);
+  if (!provider) throw new Error(`unknown provider ${providerId}`);
+
+  const cfg = App.config[providerId] || {};
+  const controller = { cancelled: false };
+  App.current = controller;
+  ui.runBusy(true);
+
+  const startedAt = new Date().toISOString();
+  const perTest = [];
+  let totalLatency = 0;
+  let totalPromptTok = 0;
+  let totalComplTok = 0;
+  let passes = 0;
+
+  ui.clearStream();
+  ui.streamLine('run', 'init', `→ ${provider.label} · ${model || '(default)'} · rubric "${rubric.name}" (${rubric.tests.length} tests)`);
+
+  let totalCostInput = 0;
+  let totalCostOutput = 0;
+  let costsKnown = true;
+
+  for (let i = 0; i < rubric.tests.length; i++) {
+    if (controller.cancelled) {
+      ui.streamLine('err', 'stop', 'cancelled by user');
+      break;
+    }
+    const t = rubric.tests[i];
+    const grader = App.graders.get(t.grader);
+    const sysText = systemOverride || t.system || rubric.system;
+    const messages = [];
+    if (sysText) messages.push({ role: 'system', content: sysText });
+
+    // ── pre-fetch search results if test specifies search ──
+    let searchResults = null;
+    let searchError = null;
+    let userContent = t.prompt;
+    if (t.search) {
+      try {
+        const sp = pickSearchProvider(t.search.provider);
+        if (!sp) throw new Error('no search provider configured');
+        const scfg = (App.config.__searchProviders || {})[sp.id] || {};
+        const query = t.search.query || t.prompt;
+        ui.streamLine('run', t.id, `🔍 ${sp.label}: "${query.slice(0,60)}"`);
+        searchResults = await sp.search(query, { topK: t.search.topK || 5, depth: t.search.depth }, scfg);
+        const block = searchResults.length
+          ? searchResults.map((r, idx) =>
+              `[${idx+1}] ${r.title}\n${r.url}\n${r.snippet}`
+            ).join('\n\n')
+          : '(no results)';
+        userContent = `Web search results for "${query}":\n\n${block}\n\n---\n\n${t.prompt}`;
+      } catch (e) {
+        searchError = e.message;
+        userContent = `(Web search failed: ${e.message})\n\n${t.prompt}`;
+      }
+    }
+    messages.push({ role: 'user', content: userContent });
+
+    ui.streamLine('run', t.id, '…');
+    ui.progress((i) / rubric.tests.length);
+
+    let result;
+    try {
+      const resp = await provider.call({
+        model: model || undefined,
+        messages,
+        temperature,
+        max_tokens: t.max_tokens,
+      }, cfg);
+
+      if (!grader) {
+        result = { pass: false, score: 0, reason: `no grader "${t.grader}"`, response: resp.text, latency_ms: resp.latency_ms, usage: resp.usage };
+      } else {
+        // ctx provides judge access + test metadata to graders that need it
+        const ctx = {
+          testId: t.id,
+          prompt: t.prompt,
+          systemPrompt: sysText,
+          callJudge: async (judgeMessages) => {
+            const jc = App.config.__judge || {};
+            if (!jc.providerId || !App.providers.has(jc.providerId)) {
+              throw new Error('judge provider not configured');
+            }
+            const jp = App.providers.get(jc.providerId);
+            const jcfg = App.config[jc.providerId] || {};
+            const r = await jp.call({
+              model: jc.model || undefined,
+              messages: judgeMessages,
+              temperature: jc.temperature ?? 0,
+            }, jcfg);
+            return r.text;
+          },
+        };
+        const g = await grader.grade(resp.text, t.expected, t.params || {}, ctx);
+        result = { ...g, response: resp.text, latency_ms: resp.latency_ms, usage: resp.usage };
+      }
+    } catch (e) {
+      result = { pass: false, score: 0, reason: `ERROR ${e.message}`, response: '', latency_ms: 0, usage: null };
+    }
+
+    perTest.push({ testId: t.id, grader: t.grader, ...result, searchResults, searchError });
+    totalLatency += result.latency_ms || 0;
+    totalPromptTok += result.usage?.prompt_tokens || 0;
+    totalComplTok += result.usage?.completion_tokens || 0;
+    if (result.pass) passes++;
+
+    // ── cost ──
+    const cost = Pricing.computeCost(providerId, model, result.usage);
+    result.cost = cost;
+    if (cost) {
+      totalCostInput  += cost.input;
+      totalCostOutput += cost.output;
+    } else if (result.usage) {
+      costsKnown = false;
+    }
+
+    ui.replaceLastStream(result.pass ? 'ok' : (result.reason.startsWith('ERROR') ? 'err' : 'fail'),
+      t.id,
+      `${result.reason} · ${result.latency_ms}ms${result.usage ? ' · '+(result.usage.completion_tokens||0)+'t' : ''}${cost ? ' · '+fmtCost(cost.total) : ''}`);
+  }
+
+  ui.progress(1);
+  const totalCost = totalCostInput + totalCostOutput;
+  const run = {
+    runId: `r_${Date.now().toString(36)}`,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    cancelled: controller.cancelled,
+    rubricId: rubric.id,
+    rubricName: rubric.name,
+    providerId,
+    providerLabel: provider.label,
+    model: model || '(default)',
+    temperature,
+    totalTests: rubric.tests.length,
+    completedTests: perTest.length,
+    passes,
+    avgLatencyMs: perTest.length ? Math.round(totalLatency / perTest.length) : 0,
+    totalLatencyMs: totalLatency,
+    promptTokens: totalPromptTok,
+    completionTokens: totalComplTok,
+    costInput: totalCostInput,
+    costOutput: totalCostOutput,
+    totalCost,
+    costsKnown,
+    tests: perTest,
+  };
+
+  App.history.unshift(run);
+  persist();
+  ui.renderHistory();
+  ui.renderRanking();
+  ui.streamLine('run', 'done', `→ ${passes}/${perTest.length} passed · ${Math.round(totalLatency)}ms total${costsKnown ? ' · '+fmtCost(totalCost) : ''}`);
+  ui.runBusy(false);
+  App.current = null;
+  return run;
+}
+
+/* ============================================================
+   PERSISTENCE
+   ============================================================ */
+function persist() {
+  App.storage.save({
+    config: App.config,
+    history: App.history.slice(0, 100),
+    rubrics: App.rubrics.filter(r => r._user && !r._source), // user-pasted only; folder-sourced re-load from disk
+    pricing: Pricing.serialize(),
+  });
+}
+
+function restore() {
+  const s = App.storage.load();
+  App.config = s.config || {};
+  App.history = s.history || [];
+  const userRubrics = s.rubrics || [];
+  const userIds = new Set(userRubrics.map(r => r.id));
+  // User-edited versions override seeded samples with the same id
+  const seedSamples = SAMPLE_RUBRICS.filter(r => !userIds.has(r.id));
+  App.rubrics = [...seedSamples, ...userRubrics];
+  Pricing.hydrate(s.pricing);
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+const ui = {
+  renderStatus() {
+    const row = document.getElementById('status-row');
+    row.innerHTML = '';
+    for (const p of App.providers.values()) {
+      const dot = document.createElement('span');
+      dot.className = 'status';
+      dot.innerHTML = `<span class="status-dot" data-provider="${p.id}"></span>${p.label}`;
+      row.appendChild(dot);
+      // async health check
+      if (p.healthCheck) {
+        const cfg = App.config[p.id] || {};
+        p.healthCheck(cfg).then(({ ok, detail }) => {
+          const d = row.querySelector(`[data-provider="${p.id}"]`);
+          if (!d) return;
+          d.classList.toggle('ok', ok);
+          d.classList.toggle('warn', !ok);
+          d.title = detail || '';
+        }).catch(() => {});
+      }
+    }
+  },
+
+  renderSettings() {
+    const body = document.getElementById('settings-body');
+    body.innerHTML = '';
+
+    // ── PRICING REFRESH ──
+    const priceRow = document.createElement('div');
+    priceRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--border);';
+    priceRow.innerHTML = `
+      <div class="small" style="color:var(--text-faint);">OpenRouter pricing cache</div>
+      <button class="ghost" id="btn-refresh-pricing" style="padding:4px 10px;font-size:10px;">REFRESH</button>
+    `;
+    body.appendChild(priceRow);
+    priceRow.querySelector('#btn-refresh-pricing').addEventListener('click', () => refreshPricing(true));
+
+    for (const p of App.providers.values()) {
+      const block = document.createElement('div');
+      block.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding-bottom:10px;border-bottom:1px solid var(--border);';
+      block.innerHTML = `<div class="small" style="color:var(--text);font-weight:600;letter-spacing:.06em;">${p.label.toUpperCase()}</div>`;
+      for (const f of p.configFields) {
+        const cur = (App.config[p.id] || {})[f.key] ?? f.default ?? '';
+        const wrap = document.createElement('label');
+        wrap.className = 'field';
+        wrap.innerHTML = `<span class="label-text"><span>${f.label}</span></span>`;
+        const inp = document.createElement('input');
+        inp.type = f.type || 'text';
+        inp.value = cur;
+        inp.placeholder = f.default || '';
+        inp.addEventListener('change', () => {
+          App.config[p.id] = App.config[p.id] || {};
+          App.config[p.id][f.key] = inp.value;
+          persist();
+          ui.renderStatus();
+        });
+        wrap.appendChild(inp);
+        block.appendChild(wrap);
+      }
+      body.appendChild(block);
+    }
+
+    // ── SEARCH PROVIDERS ─────────────────────────────────────
+    const searchSection = document.createElement('div');
+    searchSection.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding-bottom:10px;border-bottom:1px solid var(--border);';
+    searchSection.innerHTML = `<div class="small" style="color:var(--accent);font-weight:600;letter-spacing:.06em;">SEARCH PROVIDERS</div>
+      <div class="small" style="color:var(--text-faint);">Used by tests with a <code>search:</code> field. Pre-fetched results injected into the prompt before the model sees it.</div>`;
+    body.appendChild(searchSection);
+
+    for (const sp of App.searchProviders.values()) {
+      const block = document.createElement('div');
+      block.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:6px 0;';
+      block.innerHTML = `<div class="small" style="color:var(--text-dim);font-weight:600;">${sp.label.toUpperCase()}</div>`;
+      for (const f of sp.configFields) {
+        const cur = ((App.config.__searchProviders || {})[sp.id] || {})[f.key] ?? '';
+        const wrap = document.createElement('label');
+        wrap.className = 'field';
+        wrap.innerHTML = `<span class="label-text"><span>${f.label}</span></span>`;
+        const inp = document.createElement('input');
+        inp.type = f.type || 'text';
+        inp.value = cur;
+        inp.placeholder = f.placeholder || '';
+        inp.addEventListener('change', () => {
+          App.config.__searchProviders = App.config.__searchProviders || {};
+          App.config.__searchProviders[sp.id] = App.config.__searchProviders[sp.id] || {};
+          App.config.__searchProviders[sp.id][f.key] = inp.value;
+          persist();
+        });
+        wrap.appendChild(inp);
+        block.appendChild(wrap);
+      }
+      body.appendChild(block);
+    }
+
+    // ── JUDGE CONFIG ─────────────────────────────────────────
+    const jc = App.config.__judge || {};
+    const judge = document.createElement('div');
+    judge.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+    judge.innerHTML = `<div class="small" style="color:var(--accent);font-weight:600;letter-spacing:.06em;">LLM-AS-JUDGE</div>
+      <div class="small" style="color:var(--text-faint);">Used by the <code>llm-judge</code> grader to score open-ended responses.</div>`;
+
+    const provWrap = document.createElement('label');
+    provWrap.className = 'field';
+    provWrap.innerHTML = `<span class="label-text"><span>JUDGE PROVIDER</span></span>`;
+    const provSel = document.createElement('select');
+    const noneOpt = document.createElement('option');
+    noneOpt.value = ''; noneOpt.textContent = '— none —';
+    provSel.appendChild(noneOpt);
+    for (const p of App.providers.values()) {
+      const o = document.createElement('option');
+      o.value = p.id; o.textContent = p.label;
+      if (jc.providerId === p.id) o.selected = true;
+      provSel.appendChild(o);
+    }
+    provSel.addEventListener('change', () => {
+      App.config.__judge = { ...(App.config.__judge||{}), providerId: provSel.value };
+      persist();
+    });
+    provWrap.appendChild(provSel);
+    judge.appendChild(provWrap);
+
+    const modelWrap = document.createElement('label');
+    modelWrap.className = 'field';
+    modelWrap.innerHTML = `<span class="label-text"><span>JUDGE MODEL</span></span>`;
+    const modelInp = document.createElement('input');
+    modelInp.type = 'text';
+    modelInp.value = jc.model || '';
+    modelInp.placeholder = 'e.g. openai/gpt-4o-mini';
+    modelInp.addEventListener('change', () => {
+      App.config.__judge = { ...(App.config.__judge||{}), model: modelInp.value };
+      persist();
+    });
+    modelWrap.appendChild(modelInp);
+    judge.appendChild(modelWrap);
+
+    const tempWrap = document.createElement('label');
+    tempWrap.className = 'field';
+    tempWrap.innerHTML = `<span class="label-text"><span>JUDGE TEMPERATURE</span><span class="small" id="judge-temp-val">${(jc.temperature ?? 0).toFixed(2)}</span></span>`;
+    const tempInp = document.createElement('input');
+    tempInp.type = 'range';
+    tempInp.min = '0'; tempInp.max = '1'; tempInp.step = '0.05';
+    tempInp.value = jc.temperature ?? 0;
+    tempInp.addEventListener('input', () => {
+      document.getElementById('judge-temp-val').textContent = parseFloat(tempInp.value).toFixed(2);
+    });
+    tempInp.addEventListener('change', () => {
+      App.config.__judge = { ...(App.config.__judge||{}), temperature: parseFloat(tempInp.value) };
+      persist();
+    });
+    tempWrap.appendChild(tempInp);
+    judge.appendChild(tempWrap);
+
+    body.appendChild(judge);
+    document.getElementById('settings-meta').textContent = `${App.providers.size} providers · judge ${jc.providerId ? 'set' : 'off'}`;
+  },
+
+  renderRubrics() {
+    const sel = document.getElementById('sel-rubric');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const r of App.rubrics) {
+      const opt = document.createElement('option');
+      opt.value = r.id;
+      const tag = r._source ? ` [📁 ${r._source}]` : (r._user ? ' [user]' : '');
+      opt.textContent = `${r.name} · ${r.tests.length}t${tag}`;
+      sel.appendChild(opt);
+    }
+    if (prev && App.rubrics.some(r => r.id === prev)) sel.value = prev;
+    document.getElementById('rubric-meta').textContent = `${App.rubrics.length} loaded`;
+    document.getElementById('grader-list').textContent = [...App.graders.values()].map(g => g.id).join(', ');
+    this.renderRubricPreview();
+    // Keep editor selector in sync
+    if (document.getElementById('sel-edit-rubric')) this.renderEditor();
+  },
+
+  renderFolderStatus(msg, kind = 'info') {
+    const el = document.getElementById('folder-status');
+    if (!msg) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.className = `banner ${kind}`;
+    el.textContent = msg;
+    document.getElementById('btn-refresh-folder').disabled = !App.folderHandle;
+    document.getElementById('btn-forget-folder').disabled = !App.folderHandle;
+  },
+
+  renderRubricPreview() {
+    const sel = document.getElementById('sel-rubric');
+    const r = App.rubrics.find(x => x.id === sel.value);
+    const box = document.getElementById('rubric-preview');
+    if (!r) { box.textContent = '(no rubric)'; return; }
+    box.innerHTML = `<strong>${r.name}</strong> · ${r.tests.length} tests<br><span class="small">${r.description || ''}</span>`;
+  },
+
+  renderProviders() {
+    const sel = document.getElementById('sel-provider');
+    sel.innerHTML = '';
+    for (const p of App.providers.values()) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    }
+    this.updateModelHint();
+  },
+
+  updateModelHint() {
+    const id = document.getElementById('sel-provider').value;
+    const p = App.providers.get(id);
+    document.getElementById('model-hint').textContent = p?.modelHint || '';
+  },
+
+  streamLine(status, id, detail) {
+    const stream = document.getElementById('run-stream');
+    const row = document.createElement('div');
+    row.className = 'run-line';
+    row.innerHTML = `
+      <span class="run-status ${status}">${status === 'ok' ? '✓' : status === 'fail' ? '✗' : status === 'err' ? '!' : '◯'}</span>
+      <span class="run-id">${id}</span>
+      <span class="run-detail">${detail}</span>`;
+    stream.appendChild(row);
+    stream.scrollTop = stream.scrollHeight;
+  },
+
+  replaceLastStream(status, id, detail) {
+    const stream = document.getElementById('run-stream');
+    const last = stream.lastElementChild;
+    if (!last) return;
+    last.innerHTML = `
+      <span class="run-status ${status}">${status === 'ok' ? '✓' : status === 'fail' ? '✗' : status === 'err' ? '!' : '◯'}</span>
+      <span class="run-id">${id}</span>
+      <span class="run-detail" title="${detail.replace(/"/g,'&quot;')}">${detail}</span>`;
+  },
+
+  clearStream() { document.getElementById('run-stream').innerHTML = ''; },
+
+  progress(p) { document.getElementById('progress-bar').style.width = (p*100).toFixed(0) + '%'; },
+
+  runBusy(busy) {
+    document.getElementById('btn-run').disabled = busy;
+    document.getElementById('btn-cancel').disabled = !busy;
+    document.getElementById('runner-meta').textContent = busy ? 'RUNNING…' : 'idle';
+  },
+
+  renderHistory() {
+    const body = document.getElementById('history-body');
+    body.innerHTML = '';
+    if (!App.history.length) {
+      body.innerHTML = `<tr><td colspan="9" class="small" style="padding:24px;text-align:center;">no runs yet</td></tr>`;
+      return;
+    }
+    for (const run of App.history) {
+      const tr = document.createElement('tr');
+      const passRatio = `${run.passes}/${run.completedTests}`;
+      const pillCls = run.passes === run.completedTests ? 'ok' : (run.passes === 0 ? 'fail' : 'partial');
+      const costStr = run.costsKnown ? fmtCost(run.totalCost) : (run.totalCost > 0 ? `~${fmtCost(run.totalCost)}` : '—');
+      tr.innerHTML = `
+        <td class="small">${run.startedAt.replace('T',' ').slice(0,19)}</td>
+        <td>${run.rubricName}</td>
+        <td>${run.providerLabel}</td>
+        <td class="small">${run.model}</td>
+        <td><span class="pill ${pillCls}">${passRatio}</span></td>
+        <td>${run.avgLatencyMs}</td>
+        <td class="small">${(run.promptTokens||0)+'/'+(run.completionTokens||0)}</td>
+        <td class="small">${costStr}</td>
+        <td><button class="ghost" style="padding:2px 8px;font-size:10px;" data-toggle="${run.runId}">DETAIL</button></td>
+      `;
+      body.appendChild(tr);
+
+      const detail = document.createElement('tr');
+      detail.className = 'expand-row';
+      detail.style.display = 'none';
+      detail.dataset.detailFor = run.runId;
+      detail.innerHTML = `<td colspan="9">
+        ${run.tests.map(t => `
+          <div class="test-row">
+            <span class="pill ${t.pass ? 'ok':'fail'}">${t.pass?'PASS':'FAIL'}</span>
+            <div>
+              <div><strong>${t.testId}</strong> · <span class="small">${t.grader}</span>${t.searchResults ? ` · <span class="small">🔍 ${t.searchResults.length} results</span>` : ''}${t.searchError ? ` · <span class="small" style="color:var(--fail);">search err: ${escapeHtml(t.searchError)}</span>` : ''}</div>
+              <div class="small">${t.reason}</div>
+              ${t.searchResults && t.searchResults.length ? `<div class="small" style="color:var(--text-faint);margin-top:2px;">${t.searchResults.slice(0,3).map(r => '↳ '+escapeHtml(r.url || r.title)).join('<br>')}</div>` : ''}
+              <div class="response">${escapeHtml(t.response || '')}</div>
+            </div>
+            <div class="small">${t.latency_ms||0}ms · ${t.cost ? fmtCost(t.cost.total) : '—'}</div>
+            <div class="small">${t.usage?.completion_tokens||0}t</div>
+          </div>
+        `).join('')}
+      </td>`;
+      body.appendChild(detail);
+
+      tr.querySelector('[data-toggle]').addEventListener('click', () => {
+        detail.style.display = (detail.style.display === 'none') ? '' : 'none';
+      });
+    }
+    document.getElementById('footer-counts').textContent = `${App.history.length} runs · ${App.rubrics.length} rubrics · ${App.graders.size} graders`;
+  },
+
+  /* ─── NIAH BUILDER ─────────────────────────────────────── */
+  niahState: { depths: 5, lenIdx: 9, maxTokens: 100 }, // 9 → 10k tokens
+
+  computeDepths(n) {
+    if (n === 1) return [50];
+    const out = [];
+    const step = 100 / (n + 1);
+    for (let i = 1; i <= n; i++) out.push(Math.round(step * i));
+    // tidy: ensure unique
+    return [...new Set(out)];
+  },
+
+  renderNiah() {
+    const slider = document.getElementById('niah-len-slider');
+    const lenIdx = parseInt(slider.value, 10);
+    const contextTokens = NIAH_STOPS[lenIdx];
+    document.getElementById('niah-len-val').textContent = contextTokens.toLocaleString() + ' tokens';
+
+    const depthsCount = this.niahState.depths;
+    const depths = this.computeDepths(depthsCount);
+    document.getElementById('niah-depth-summary').textContent =
+      `${depths.length} depth${depths.length === 1 ? '' : 's'}: ${depths.map(d => d + '%').join(' · ')}`;
+
+    const maxTokens = parseInt(document.getElementById('niah-maxtok').value, 10);
+    document.getElementById('niah-maxtok-val').textContent = maxTokens;
+
+    // Summary stats
+    const testCount = depths.length;
+    document.getElementById('niah-stat-tests').textContent = testCount;
+    document.getElementById('niah-stat-tokens').textContent = '~' + contextTokens.toLocaleString();
+
+    // Cost estimate against current runner selection
+    const providerId = document.getElementById('sel-provider').value;
+    const model = document.getElementById('inp-model').value.trim();
+    const cost = Niah.estimateCost(providerId, model, contextTokens, maxTokens, testCount);
+    const costEl = document.getElementById('niah-stat-cost');
+    const noteEl = document.getElementById('niah-stat-cost-note');
+    costEl.classList.remove('warn', 'fail');
+    if (!cost.known) {
+      costEl.textContent = '—';
+      noteEl.textContent = model ? 'no pricing for this model' : 'select model in RUNNER';
+    } else {
+      costEl.textContent = fmtCost(cost.total);
+      noteEl.textContent = `${fmtCost(cost.perTest)} × ${testCount} tests`;
+      if (cost.total > 5)       costEl.classList.add('fail');
+      else if (cost.total > 0.50) costEl.classList.add('warn');
+    }
+
+    // Warnings
+    const warn = document.getElementById('niah-warn');
+    const msgs = [];
+    if (contextTokens > 200000) msgs.push('most models cap at 128k–200k context — large stops may error');
+    else if (contextTokens > 128000) msgs.push('exceeds GPT-4-class 128k limit; works on Claude 200k / Gemini 1M');
+    if (cost.known && cost.total > 5) msgs.push(`⚠ estimated cost > ${fmtCost(cost.total)}`);
+    warn.style.display = msgs.length ? '' : 'none';
+    warn.innerHTML = msgs.join(' · ');
+  },
+
+  /* ─── RUBRIC EDITOR ────────────────────────────────────── */
+  editor: {
+    draft: null,        // working copy of the selected rubric
+    selectedId: null,
+    dirty: false,
+  },
+
+  editorLoad(rubricId) {
+    const r = App.rubrics.find(x => x.id === rubricId);
+    if (!r) { this.editor.draft = null; this.editor.selectedId = null; this.renderEditor(); return; }
+    this.editor.draft = JSON.parse(JSON.stringify(r));   // deep clone
+    this.editor.selectedId = rubricId;
+    this.editor.dirty = false;
+    this.renderEditor();
+  },
+
+  editorMarkDirty() {
+    this.editor.dirty = true;
+    const flag = document.getElementById('edit-dirty-flag');
+    if (flag) { flag.textContent = '● unsaved changes'; flag.classList.add('dirty'); }
+  },
+
+  editorSave() {
+    if (!this.editor.draft) return;
+    const d = this.editor.draft;
+    if (!d.id || !d.name || !Array.isArray(d.tests)) {
+      alert('Rubric needs id, name, and tests[].');
+      return;
+    }
+    // Validate test JSON fields
+    for (const t of d.tests) {
+      if (typeof t._paramsRaw === 'string') {
+        try { t.params = t._paramsRaw.trim() ? JSON.parse(t._paramsRaw) : undefined; }
+        catch (e) { alert(`Test "${t.id}": params JSON invalid: ${e.message}`); return; }
+        delete t._paramsRaw;
+      }
+      if (typeof t._expectedRaw === 'string') {
+        const raw = t._expectedRaw.trim();
+        if (raw === '') { t.expected = null; }
+        else {
+          try { t.expected = JSON.parse(raw); }
+          catch { t.expected = raw; } // fall back to plain string
+        }
+        delete t._expectedRaw;
+      }
+      if (typeof t._searchRaw === 'string') {
+        const raw = t._searchRaw.trim();
+        if (!raw) { delete t.search; }
+        else {
+          try { t.search = JSON.parse(raw); }
+          catch (e) { alert(`Test "${t.id}": search JSON invalid: ${e.message}`); return; }
+        }
+        delete t._searchRaw;
+      }
+    }
+    d._user = true;
+    // Replace in App.rubrics (or append if id changed)
+    const idx = App.rubrics.findIndex(r => r.id === this.editor.selectedId);
+    if (idx >= 0 && App.rubrics[idx].id === d.id) {
+      App.rubrics[idx] = d;
+    } else if (idx >= 0) {
+      // id changed — replace at same index
+      App.rubrics[idx] = d;
+    } else {
+      App.rubrics.push(d);
+    }
+    this.editor.selectedId = d.id;
+    this.editor.dirty = false;
+    persist();
+    this.renderRubrics();
+    this.editorLoad(d.id);
+    ui.streamLine('ok', 'editor', `saved "${d.name}" · ${d.tests.length} tests`);
+  },
+
+  editorRevert() {
+    if (!this.editor.selectedId) return;
+    this.editorLoad(this.editor.selectedId);
+  },
+
+  editorResetSample() {
+    if (!this.editor.draft) return;
+    const sample = SAMPLE_RUBRICS.find(r => r.id === this.editor.draft.id);
+    if (!sample) { alert('Not a built-in sample rubric — nothing to reset to.'); return; }
+    if (!confirm(`Discard your edits and restore the built-in "${sample.name}"?`)) return;
+    // remove user version from persisted store
+    App.rubrics = App.rubrics.filter(r => r.id !== sample.id);
+    App.rubrics.unshift(JSON.parse(JSON.stringify(sample)));
+    persist();
+    this.renderRubrics();
+    this.editorLoad(sample.id);
+  },
+
+  editorDelete() {
+    if (!this.editor.draft) return;
+    const d = this.editor.draft;
+    if (!confirm(`Delete rubric "${d.name}"? This cannot be undone (built-in samples can be recovered with RESET).`)) return;
+    App.rubrics = App.rubrics.filter(r => r.id !== d.id);
+    // re-seed built-in if applicable
+    const sample = SAMPLE_RUBRICS.find(r => r.id === d.id);
+    if (sample) App.rubrics.unshift(JSON.parse(JSON.stringify(sample)));
+    persist();
+    this.renderRubrics();
+    const next = App.rubrics[0];
+    if (next) this.editorLoad(next.id);
+    else { this.editor.draft = null; this.editor.selectedId = null; this.renderEditor(); }
+  },
+
+  editorNew() {
+    const fresh = {
+      id: `rubric_${Date.now().toString(36)}`,
+      name: 'New Rubric',
+      description: '',
+      tests: [{ id: 'test1', prompt: '', expected: '', grader: 'exact', params: {} }],
+      _user: true,
+    };
+    App.rubrics.push(fresh);
+    persist();
+    this.renderRubrics();
+    this.editorLoad(fresh.id);
+  },
+
+  editorClone() {
+    if (!this.editor.draft) return;
+    const copy = JSON.parse(JSON.stringify(this.editor.draft));
+    copy.id = `${copy.id}_copy_${Date.now().toString(36).slice(-4)}`;
+    copy.name = `${copy.name} (copy)`;
+    copy._user = true;
+    delete copy._source;
+    App.rubrics.push(copy);
+    persist();
+    this.renderRubrics();
+    this.editorLoad(copy.id);
+  },
+
+  editorAddTest() {
+    if (!this.editor.draft) return;
+    this.editor.draft.tests.push({ id: `test${this.editor.draft.tests.length + 1}`, prompt: '', expected: '', grader: 'exact', params: {} });
+    this.editorMarkDirty();
+    this.renderEditor();
+  },
+
+  editorDeleteTest(idx) {
+    if (!this.editor.draft) return;
+    if (!confirm(`Delete test "${this.editor.draft.tests[idx].id}"?`)) return;
+    this.editor.draft.tests.splice(idx, 1);
+    this.editorMarkDirty();
+    this.renderEditor();
+  },
+
+  editorMoveTest(idx, dir) {
+    if (!this.editor.draft) return;
+    const j = idx + dir;
+    if (j < 0 || j >= this.editor.draft.tests.length) return;
+    const tests = this.editor.draft.tests;
+    [tests[idx], tests[j]] = [tests[j], tests[idx]];
+    this.editorMarkDirty();
+    this.renderEditor();
+  },
+
+  renderEditor() {
+    // Populate selector
+    const sel = document.getElementById('sel-edit-rubric');
+    const prev = this.editor.selectedId;
+    sel.innerHTML = '';
+    for (const r of App.rubrics) {
+      const o = document.createElement('option');
+      o.value = r.id;
+      const tag = r._source ? ` [📁 ${r._source}]` : (r._user ? ' [user]' : ' [sample]');
+      o.textContent = `${r.name}${tag}`;
+      sel.appendChild(o);
+    }
+    if (prev && App.rubrics.some(r => r.id === prev)) sel.value = prev;
+    else if (App.rubrics[0]) { this.editor.selectedId = App.rubrics[0].id; sel.value = this.editor.selectedId; }
+
+    const d = this.editor.draft;
+    document.getElementById('edit-id').value = d?.id || '';
+    document.getElementById('edit-name').value = d?.name || '';
+    document.getElementById('edit-desc').value = d?.description || '';
+    document.getElementById('edit-system').value = d?.system || '';
+    document.getElementById('edit-test-count').textContent = d?.tests?.length || 0;
+    document.getElementById('editor-meta').textContent = d ? (d._user ? 'editing user rubric' : (d._source ? `editing folder rubric (${d._source})` : 'editing built-in sample')) : 'no rubric loaded';
+
+    // Reset button visibility
+    const resetBtn = document.getElementById('btn-edit-reset');
+    resetBtn.style.display = (d && SAMPLE_RUBRICS.some(s => s.id === d.id)) ? '' : 'none';
+
+    // Dirty flag
+    const flag = document.getElementById('edit-dirty-flag');
+    if (this.editor.dirty) { flag.textContent = '● unsaved changes'; flag.classList.add('dirty'); }
+    else { flag.textContent = ''; flag.classList.remove('dirty'); }
+
+    // Render test cards
+    const host = document.getElementById('editor-tests');
+    host.innerHTML = '';
+    if (!d) return;
+    const graderIds = [...App.graders.keys()];
+    d.tests.forEach((t, idx) => {
+      const card = document.createElement('div');
+      card.className = 'test-card';
+      const expectedRaw = (t._expectedRaw != null)
+        ? t._expectedRaw
+        : (t.expected == null ? '' : (typeof t.expected === 'string' ? t.expected : JSON.stringify(t.expected, null, 2)));
+      const paramsRaw = (t._paramsRaw != null)
+        ? t._paramsRaw
+        : (t.params && Object.keys(t.params).length ? JSON.stringify(t.params, null, 2) : '');
+      const searchRaw = (t._searchRaw != null)
+        ? t._searchRaw
+        : (t.search ? JSON.stringify(t.search, null, 2) : '');
+
+      card.innerHTML = `
+        <div class="test-card-head">
+          <span class="small">TEST #${idx + 1}</span>
+          <div class="test-card-actions">
+            <button data-act="up"   data-idx="${idx}" title="Move up">▲</button>
+            <button data-act="down" data-idx="${idx}" title="Move down">▼</button>
+            <button data-act="del"  data-idx="${idx}" title="Delete">✕</button>
+          </div>
+        </div>
+        <div class="test-card-grid">
+          <label class="field">
+            <span class="label-text">ID</span>
+            <input data-field="id" data-idx="${idx}" type="text" value="${escapeHtml(t.id || '')}" />
+          </label>
+          <label class="field">
+            <span class="label-text">GRADER</span>
+            <select data-field="grader" data-idx="${idx}">
+              ${graderIds.map(g => `<option value="${g}"${g === t.grader ? ' selected' : ''}>${g}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+        <label class="field">
+          <span class="label-text">PROMPT (what's sent to the model)</span>
+          <textarea data-field="prompt" data-idx="${idx}" rows="3">${escapeHtml(t.prompt || '')}</textarea>
+        </label>
+        <div class="test-card-grid">
+          <label class="field">
+            <span class="label-text">EXPECTED <span class="type-hint" data-hint="${idx}"></span></span>
+            <textarea data-field="expected" data-idx="${idx}" rows="2">${escapeHtml(expectedRaw)}</textarea>
+          </label>
+          <label class="field">
+            <span class="label-text">PARAMS (JSON, optional) <span class="type-hint" data-phint="${idx}"></span></span>
+            <textarea data-field="params" data-idx="${idx}" rows="2">${escapeHtml(paramsRaw)}</textarea>
+          </label>
+        </div>
+        <details ${searchRaw ? 'open' : ''}>
+          <summary class="search-toggle">▸ search injection (optional)</summary>
+          <label class="field" style="margin-top:6px;">
+            <span class="label-text">SEARCH JSON — e.g. <code>{"query": "...", "topK": 5}</code></span>
+            <textarea data-field="search" data-idx="${idx}" rows="2">${escapeHtml(searchRaw)}</textarea>
+          </label>
+        </details>
+      `;
+      host.appendChild(card);
+      this.editorHintTypes(idx);
+    });
+
+    // Wire card-level events
+    host.querySelectorAll('[data-act]').forEach(btn => {
+      const act = btn.dataset.act;
+      const idx = parseInt(btn.dataset.idx, 10);
+      btn.addEventListener('click', () => {
+        if (act === 'up') ui.editorMoveTest(idx, -1);
+        else if (act === 'down') ui.editorMoveTest(idx, +1);
+        else if (act === 'del') ui.editorDeleteTest(idx);
+      });
+    });
+    host.querySelectorAll('[data-field]').forEach(el => {
+      const field = el.dataset.field;
+      const idx = parseInt(el.dataset.idx, 10);
+      el.addEventListener('input', () => {
+        const t = ui.editor.draft.tests[idx];
+        if (field === 'expected') t._expectedRaw = el.value;
+        else if (field === 'params') t._paramsRaw = el.value;
+        else if (field === 'search') t._searchRaw = el.value;
+        else t[field] = el.value;
+        ui.editorMarkDirty();
+        ui.editorHintTypes(idx);
+      });
+    });
+  },
+
+  editorHintTypes(idx) {
+    const t = this.editor.draft.tests[idx];
+    const exp = document.querySelector(`[data-hint="${idx}"]`);
+    const par = document.querySelector(`[data-phint="${idx}"]`);
+    if (exp) {
+      const raw = (t._expectedRaw != null) ? t._expectedRaw : (typeof t.expected === 'string' ? t.expected : JSON.stringify(t.expected));
+      let kind = 'string';
+      let bad = false;
+      const trimmed = (raw || '').trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('"') || /^-?\d/.test(trimmed) || trimmed === 'true' || trimmed === 'false' || trimmed === 'null') {
+        try { const v = JSON.parse(trimmed); kind = Array.isArray(v) ? 'array' : typeof v; }
+        catch { kind = 'string (JSON-like but invalid → kept as string)'; bad = true; }
+      }
+      exp.textContent = `· ${kind}`;
+      exp.classList.toggle('bad', bad);
+    }
+    if (par) {
+      const raw = (t._paramsRaw != null) ? t._paramsRaw : (t.params ? JSON.stringify(t.params) : '');
+      if (!raw.trim()) { par.textContent = ''; par.classList.remove('bad'); }
+      else { try { JSON.parse(raw); par.textContent = '· valid JSON'; par.classList.remove('bad'); }
+            catch (e) { par.textContent = `· invalid JSON: ${e.message}`; par.classList.add('bad'); } }
+    }
+  },
+
+  /* ─── RANKING ──────────────────────────────────────────── */
+  renderRanking() {
+    // Populate rubric filter dropdown
+    const rubricSel = document.getElementById('sel-rank-rubric');
+    const prevRubric = rubricSel.value;
+    rubricSel.innerHTML = '<option value="">all rubrics</option>';
+    const rubricsInHistory = [...new Set(App.history.map(r => r.rubricId))];
+    for (const rid of rubricsInHistory) {
+      const meta = App.history.find(h => h.rubricId === rid);
+      const o = document.createElement('option');
+      o.value = rid;
+      o.textContent = meta?.rubricName || rid;
+      rubricSel.appendChild(o);
+    }
+    if (prevRubric && [...rubricSel.options].some(o => o.value === prevRubric)) {
+      rubricSel.value = prevRubric;
+    }
+
+    const filterRubric = rubricSel.value;
+    const sortKey = document.getElementById('sel-rank-sort').value;
+
+    // Aggregate
+    const filtered = filterRubric
+      ? App.history.filter(r => r.rubricId === filterRubric)
+      : App.history;
+
+    const groups = new Map(); // key → agg
+    for (const run of filtered) {
+      const key = `${run.providerId}::${run.model}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = {
+          key,
+          providerId: run.providerId,
+          providerLabel: run.providerLabel,
+          model: run.model,
+          runs: 0,
+          totalTests: 0,
+          totalPasses: 0,
+          totalLatencyMs: 0,
+          latencyCount: 0,
+          totalCost: 0,
+          costKnownRuns: 0,
+        };
+        groups.set(key, g);
+      }
+      g.runs += 1;
+      g.totalTests += run.completedTests;
+      g.totalPasses += run.passes;
+      g.totalLatencyMs += run.totalLatencyMs || 0;
+      g.latencyCount += run.completedTests;
+      if (run.costsKnown) {
+        g.totalCost += run.totalCost || 0;
+        g.costKnownRuns += 1;
+      } else if (run.totalCost) {
+        g.totalCost += run.totalCost; // partial — counted but flagged
+      }
+    }
+
+    const rows = [...groups.values()].map(g => ({
+      ...g,
+      passRate: g.totalTests ? g.totalPasses / g.totalTests : 0,
+      avgLatency: g.latencyCount ? Math.round(g.totalLatencyMs / g.latencyCount) : 0,
+      avgCost: g.costKnownRuns ? g.totalCost / g.costKnownRuns : null,
+    }));
+
+    rows.sort((a, b) => {
+      if (sortKey === 'passRate')   return b.passRate - a.passRate || (a.totalCost - b.totalCost);
+      if (sortKey === 'avgCost')    return (a.avgCost ?? Infinity) - (b.avgCost ?? Infinity);
+      if (sortKey === 'avgLatency') return a.avgLatency - b.avgLatency;
+      if (sortKey === 'runs')       return b.runs - a.runs;
+      return 0;
+    });
+
+    const body = document.getElementById('ranking-body');
+    body.innerHTML = '';
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="8" class="small" style="padding:24px;text-align:center;">no runs match filter</td></tr>`;
+      return;
+    }
+
+    const maxPass = Math.max(...rows.map(r => r.passRate));
+    rows.forEach((r, i) => {
+      const tr = document.createElement('tr');
+      tr.className = `rank-row ${i === 0 ? 'top' : (i > 4 ? 'dim' : '')}`;
+      const barW = Math.max(1, Math.round(r.passRate * 60));
+      tr.innerHTML = `
+        <td class="rank-pos">${i + 1}</td>
+        <td><strong>${r.providerLabel}</strong> <span class="small">· ${r.model}</span></td>
+        <td>${r.runs}</td>
+        <td>${r.totalTests}</td>
+        <td>
+          <span class="rank-bar" style="width:${barW}px;"></span>
+          ${(r.passRate * 100).toFixed(0)}% <span class="small">(${r.totalPasses}/${r.totalTests})</span>
+        </td>
+        <td>${r.avgLatency}</td>
+        <td>${r.avgCost != null ? fmtCost(r.avgCost) : '—'}</td>
+        <td>${fmtCost(r.totalCost)}</td>
+      `;
+      body.appendChild(tr);
+    });
+  },
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c]));
+}
+
+/* ============================================================
+   RUBRIC FOLDER LOADING (File System Access API)
+   ============================================================ */
+async function pickRubricFolder() {
+  if (!window.showDirectoryPicker) {
+    ui.renderFolderStatus('directory picker not supported in this browser', 'error');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'read' });
+    App.folderHandle = handle;
+    App.folderHandlePending = false;
+    await idb.set('folderHandle', handle);
+    await refreshRubricFolder();
+  } catch (e) {
+    if (e.name !== 'AbortError') ui.renderFolderStatus(`pick failed: ${e.message}`, 'error');
+  }
+}
+
+async function refreshRubricFolder() {
+  if (!App.folderHandle) return;
+  // ensure permission
+  const perm = await App.folderHandle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') {
+    const req = await App.folderHandle.requestPermission({ mode: 'read' });
+    if (req !== 'granted') {
+      ui.renderFolderStatus('folder permission denied', 'error');
+      return;
+    }
+  }
+  App.folderHandlePending = false;
+
+  const loaded = [];
+  const errors = [];
+  try {
+    for await (const [name, entry] of App.folderHandle.entries()) {
+      if (entry.kind !== 'file' || !name.toLowerCase().endsWith('.json')) continue;
+      try {
+        const file = await entry.getFile();
+        const text = await file.text();
+        const r = JSON.parse(text);
+        if (!r.id || !Array.isArray(r.tests)) throw new Error('missing id or tests[]');
+        r._user = true;
+        r._source = name;
+        loaded.push(r);
+      } catch (e) {
+        errors.push(`${name}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    ui.renderFolderStatus(`folder read failed: ${e.message}`, 'error');
+    return;
+  }
+
+  // drop existing folder-sourced rubrics, splice in new
+  App.rubrics = App.rubrics.filter(r => !r._source);
+  App.rubrics.push(...loaded);
+  ui.renderRubrics();
+
+  const folderName = App.folderHandle.name || 'folder';
+  let msg = `📁 ${folderName} · loaded ${loaded.length} rubric${loaded.length === 1 ? '' : 's'}`;
+  if (errors.length) msg += ` · ${errors.length} error${errors.length === 1 ? '' : 's'}: ${errors.join('; ').slice(0,140)}`;
+  ui.renderFolderStatus(msg, errors.length ? 'warn' : 'info');
+}
+
+async function forgetRubricFolder() {
+  App.rubrics = App.rubrics.filter(r => !r._source);
+  App.folderHandle = null;
+  App.folderHandlePending = false;
+  await idb.del('folderHandle');
+  ui.renderRubrics();
+  ui.renderFolderStatus('');
+  document.getElementById('btn-refresh-folder').disabled = true;
+  document.getElementById('btn-forget-folder').disabled = true;
+}
+
+async function restoreFolderIfAny() {
+  try {
+    const h = await idb.get('folderHandle');
+    if (!h) return;
+    App.folderHandle = h;
+    const perm = await h.queryPermission({ mode: 'read' });
+    if (perm === 'granted') {
+      await refreshRubricFolder();
+    } else {
+      App.folderHandlePending = true;
+      ui.renderFolderStatus(`📁 ${h.name || 'folder'} · click REFRESH to re-grant access`, 'warn');
+      document.getElementById('btn-refresh-folder').disabled = false;
+      document.getElementById('btn-forget-folder').disabled = false;
+    }
+  } catch (e) {
+    // ignore — fresh start
+  }
+}
+
+/* ============================================================
+   CSV EXPORT
+   ============================================================ */
+function csvEscape(v) {
+  if (v == null) return '';
+  const s = String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function downloadCsv(filename, rows) {
+  const csv = rows.map(r => r.map(csvEscape).join(',')).join('\r\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
+function buildSummaryCsv() {
+  const head = ['run_id','started_at','finished_at','rubric_id','rubric_name','provider_id','provider_label','model','temperature','total_tests','completed_tests','passes','pass_rate','avg_latency_ms','total_latency_ms','prompt_tokens','completion_tokens','total_tokens','cost_input_usd','cost_output_usd','total_cost_usd','costs_known'];
+  const rows = [head];
+  for (const r of App.history) {
+    rows.push([
+      r.runId, r.startedAt, r.finishedAt, r.rubricId, r.rubricName,
+      r.providerId, r.providerLabel, r.model, r.temperature,
+      r.totalTests, r.completedTests, r.passes,
+      r.completedTests ? (r.passes / r.completedTests).toFixed(4) : '',
+      r.avgLatencyMs, r.totalLatencyMs,
+      r.promptTokens || 0, r.completionTokens || 0, (r.promptTokens||0)+(r.completionTokens||0),
+      (r.costInput || 0).toFixed(8), (r.costOutput || 0).toFixed(8), (r.totalCost || 0).toFixed(8),
+      r.costsKnown ? 'true' : 'false',
+    ]);
+  }
+  return rows;
+}
+
+function buildDetailCsv() {
+  const head = ['run_id','started_at','rubric_id','rubric_name','provider_id','model','test_id','grader','pass','score','latency_ms','prompt_tokens','completion_tokens','cost_input_usd','cost_output_usd','total_cost_usd','reason','response'];
+  const rows = [head];
+  for (const r of App.history) {
+    for (const t of r.tests) {
+      rows.push([
+        r.runId, r.startedAt, r.rubricId, r.rubricName, r.providerId, r.model,
+        t.testId, t.grader, t.pass, t.score,
+        t.latency_ms || 0,
+        t.usage?.prompt_tokens || 0,
+        t.usage?.completion_tokens || 0,
+        t.cost ? t.cost.input.toFixed(8)  : '',
+        t.cost ? t.cost.output.toFixed(8) : '',
+        t.cost ? t.cost.total.toFixed(8)  : '',
+        t.reason,
+        (t.response || '').slice(0, 2000),
+      ]);
+    }
+  }
+  return rows;
+}
+
+/* ============================================================
+   PRICING FETCH (UI-facing wrapper)
+   ============================================================ */
+async function refreshPricing(force = false) {
+  const statusEl = document.getElementById('pricing-status');
+  if (!force && !Pricing.isStale('openrouter')) {
+    if (statusEl) {
+      const count = Object.keys(Pricing.data.openrouter?.models || {}).length;
+      const age = Math.round((Date.now() - Pricing.data.openrouter.fetchedAt) / 60000);
+      statusEl.innerHTML = `<span class="status-dot ok"></span>PRICING · ${count} models · ${age}m old`;
+    }
+    return;
+  }
+  if (statusEl) statusEl.innerHTML = `<span class="status-dot warn"></span>PRICING · fetching…`;
+  try {
+    const n = await Pricing.fetchOpenRouter();
+    persist();
+    if (statusEl) statusEl.innerHTML = `<span class="status-dot ok"></span>PRICING · ${n} models · fresh`;
+    ui.renderHistory();
+    ui.renderRanking();
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<span class="status-dot fail"></span>PRICING · ${e.message}`;
+  }
+}
+
+/* ============================================================
+   EVENT WIRING
+   ============================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  restore();
+  ui.renderStatus();
+  ui.renderSettings();
+  ui.renderProviders();
+  ui.renderRubrics();
+  ui.renderHistory();
+  ui.renderRanking();
+
+  // background pricing refresh (uses public endpoint, no auth required)
+  refreshPricing(false);
+
+  document.getElementById('sel-rubric').addEventListener('change', () => ui.renderRubricPreview());
+  document.getElementById('sel-provider').addEventListener('change', () => ui.updateModelHint());
+
+  document.getElementById('inp-temp').addEventListener('input', (e) => {
+    document.getElementById('temp-val').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+
+  document.getElementById('btn-run').addEventListener('click', async () => {
+    const rubricId = document.getElementById('sel-rubric').value;
+    const providerId = document.getElementById('sel-provider').value;
+    const model = document.getElementById('inp-model').value.trim();
+    const temperature = parseFloat(document.getElementById('inp-temp').value);
+    const systemOverride = document.getElementById('inp-system').value.trim() || null;
+    const rubric = App.rubrics.find(r => r.id === rubricId);
+    if (!rubric) return;
+    try {
+      await runRubric({ rubric, providerId, model, temperature, systemOverride });
+    } catch (e) {
+      ui.streamLine('err', 'fatal', e.message);
+      ui.runBusy(false);
+    }
+  });
+
+  document.getElementById('btn-cancel').addEventListener('click', () => {
+    if (App.current) App.current.cancelled = true;
+  });
+
+  document.getElementById('btn-import-rubric').addEventListener('click', () => {
+    const txt = document.getElementById('ta-rubric').value.trim();
+    if (!txt) return;
+    try {
+      const r = JSON.parse(txt);
+      if (!r.id || !Array.isArray(r.tests)) throw new Error('rubric needs id + tests[]');
+      r._user = true;
+      const existing = App.rubrics.findIndex(x => x.id === r.id);
+      if (existing >= 0) App.rubrics[existing] = r; else App.rubrics.push(r);
+      persist();
+      ui.renderRubrics();
+      ui.streamLine('ok', 'import', `loaded "${r.name || r.id}" · ${r.tests.length} tests`);
+    } catch (e) {
+      ui.streamLine('err', 'import', e.message);
+    }
+  });
+
+  document.getElementById('btn-export-rubric').addEventListener('click', () => {
+    const rid = document.getElementById('sel-rubric').value;
+    const r = App.rubrics.find(x => x.id === rid);
+    if (!r) return;
+    document.getElementById('ta-rubric').value = JSON.stringify(r, null, 2);
+  });
+
+  document.getElementById('btn-load-file').addEventListener('click', async () => {
+    if (window.showOpenFilePicker) {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+        });
+        const file = await handle.getFile();
+        document.getElementById('ta-rubric').value = await file.text();
+      } catch {}
+    } else {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.json';
+      inp.onchange = async () => {
+        const f = inp.files[0];
+        if (f) document.getElementById('ta-rubric').value = await f.text();
+      };
+      inp.click();
+    }
+  });
+
+  document.getElementById('btn-export-history').addEventListener('click', () => {
+    const blob = new Blob([JSON.stringify(App.history, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `llm-eval-history-${Date.now()}.json`;
+    a.click();
+  });
+
+  document.getElementById('btn-csv-summary').addEventListener('click', () => {
+    if (!App.history.length) return;
+    downloadCsv(`llm-eval-summary-${Date.now()}.csv`, buildSummaryCsv());
+  });
+
+  document.getElementById('btn-csv-detail').addEventListener('click', () => {
+    if (!App.history.length) return;
+    downloadCsv(`llm-eval-detail-${Date.now()}.csv`, buildDetailCsv());
+  });
+
+  document.getElementById('btn-clear-history').addEventListener('click', () => {
+    if (confirm('Clear all run history?')) {
+      App.history = [];
+      persist();
+      ui.renderHistory();
+      ui.renderRanking();
+    }
+  });
+
+  document.getElementById('sel-rank-rubric').addEventListener('change', () => ui.renderRanking());
+  document.getElementById('sel-rank-sort').addEventListener('change', () => ui.renderRanking());
+
+  /* ── NIAH BUILDER WIRING ────────────────────────────────── */
+  const niahSlider = document.getElementById('niah-len-slider');
+  const niahMaxTok = document.getElementById('niah-maxtok');
+  niahSlider.addEventListener('input', () => ui.renderNiah());
+  niahMaxTok.addEventListener('input', () => ui.renderNiah());
+
+  document.querySelectorAll('.niah-depth-chips .chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.niah-depth-chips .chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      ui.niahState.depths = parseInt(chip.dataset.depthCount, 10);
+      ui.renderNiah();
+    });
+  });
+
+  // Recompute cost when runner selection changes
+  document.getElementById('sel-provider').addEventListener('change', () => ui.renderNiah());
+  document.getElementById('inp-model').addEventListener('input', () => ui.renderNiah());
+
+  document.getElementById('btn-niah-generate').addEventListener('click', () => {
+    const lenIdx = parseInt(niahSlider.value, 10);
+    const contextTokens = NIAH_STOPS[lenIdx];
+    const depths = ui.computeDepths(ui.niahState.depths);
+    const needle = document.getElementById('niah-needle').value.trim();
+    const question = document.getElementById('niah-question').value.trim();
+    const keywords = document.getElementById('niah-keywords').value
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const maxTokens = parseInt(niahMaxTok.value, 10);
+
+    if (!needle || !question || !keywords.length) {
+      ui.streamLine('err', 'niah', 'needle, question, and at least one keyword required');
+      return;
+    }
+
+    const rubric = Niah.buildRubric({ contextTokens, depths, needle, question, keywords, maxTokens });
+    // splice into rubrics, replacing any prior generated NIAH with same id (won't collide due to timestamp)
+    App.rubrics.push(rubric);
+    persist();
+    ui.renderRubrics();
+    // auto-select in runner
+    document.getElementById('sel-rubric').value = rubric.id;
+    ui.renderRubricPreview();
+    ui.streamLine('ok', 'niah', `generated "${rubric.name}" · ${rubric.tests.length} tests · selected in RUNNER`);
+  });
+
+  // Initial render
+  ui.renderNiah();
+
+  /* ── EDITOR WIRING ──────────────────────────────────────── */
+  document.getElementById('sel-edit-rubric').addEventListener('change', e => {
+    if (ui.editor.dirty && !confirm('Discard unsaved changes?')) {
+      // revert dropdown to current selection
+      e.target.value = ui.editor.selectedId;
+      return;
+    }
+    ui.editorLoad(e.target.value);
+  });
+  ['edit-id','edit-name','edit-desc','edit-system'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+      if (!ui.editor.draft) return;
+      const key = id === 'edit-id' ? 'id' : id === 'edit-name' ? 'name' : id === 'edit-desc' ? 'description' : 'system';
+      ui.editor.draft[key] = document.getElementById(id).value;
+      ui.editorMarkDirty();
+    });
+  });
+  document.getElementById('btn-edit-save').addEventListener('click',     () => ui.editorSave());
+  document.getElementById('btn-edit-revert').addEventListener('click',   () => ui.editorRevert());
+  document.getElementById('btn-edit-reset').addEventListener('click',    () => ui.editorResetSample());
+  document.getElementById('btn-edit-delete').addEventListener('click',   () => ui.editorDelete());
+  document.getElementById('btn-edit-new').addEventListener('click',      () => ui.editorNew());
+  document.getElementById('btn-edit-clone').addEventListener('click',    () => ui.editorClone());
+  document.getElementById('btn-edit-add-test').addEventListener('click', () => ui.editorAddTest());
+
+  // Load first rubric into editor on startup
+  if (App.rubrics[0]) ui.editorLoad(App.rubrics[0].id);
+
+  document.getElementById('btn-load-folder').addEventListener('click', pickRubricFolder);
+  document.getElementById('btn-refresh-folder').addEventListener('click', refreshRubricFolder);
+  document.getElementById('btn-forget-folder').addEventListener('click', forgetRubricFolder);
+
+  // attempt to restore previously-picked folder (no-op if none)
+  restoreFolderIfAny();
+
+  /* ── DEV MODE ────────────────────────────────────────────
+     ?dev=1 enables panel reorder via SortableJS + copy-layout button.
+     ─────────────────────────────────────────────────────── */
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('dev') === '1') {
+    document.body.classList.add('dev');
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js';
+    s.onload = () => {
+      Sortable.create(document.getElementById('panel-grid'), {
+        handle: '.panel-header',
+        animation: 150,
+      });
+      const btn = document.createElement('button');
+      btn.id = 'dev-copy-btn';
+      btn.className = 'primary';
+      btn.textContent = '⧉ COPY LAYOUT JSON';
+      btn.onclick = () => {
+        const order = [...document.querySelectorAll('#panel-grid .panel')].map(p => p.dataset.panelId);
+        navigator.clipboard.writeText(JSON.stringify(order, null, 2));
+        btn.textContent = '✓ COPIED';
+        setTimeout(() => btn.textContent = '⧉ COPY LAYOUT JSON', 1200);
+      };
+      document.body.appendChild(btn);
+    };
+    document.head.appendChild(s);
+  }
+});
+</script>
+</body>
+</html>
