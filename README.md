@@ -125,7 +125,7 @@ The NIAH builder stress-tests **retrieval in long context**:
 
 Click **GENERATE RUBRIC**, then run it from the Runner like any other rubric. Cost estimates use the model selected in Runner and OpenRouter pricing when available.
 
-> **Note:** Generated NIAH rubrics embed full haystack text in each test prompt. Very large contexts produce huge rubrics — prefer regenerating NIAH rubrics over keeping many in browser storage.
+> **Note:** NIAH rubrics embed full haystack text in each test **at run time**. Only a compact **recipe** (length, depths, needle, keywords) is saved to `localStorage` and rebuilt on reload — not the full prompts.
 
 ## Search providers
 

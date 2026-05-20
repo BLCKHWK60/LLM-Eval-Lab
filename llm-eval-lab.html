@@ -1118,6 +1118,8 @@ const Niah = {
       tests,
       _user: true,
       _niah: true,
+      // Compact recipe for localStorage — full tests are rebuilt on restore, not persisted
+      _niahRecipe: { contextTokens, depths, needle, question, keywords, maxTokens, seed },
     };
   },
 };
@@ -1786,6 +1788,7 @@ async function runRubric({ rubric, providerId, model, temperature, systemOverrid
               model: jc.model || undefined,
               messages: judgeMessages,
               temperature: jc.temperature ?? 0,
+              max_tokens: jc.max_tokens ?? 256,
             }, jcfg);
             return r.text;
           },
@@ -1858,11 +1861,49 @@ async function runRubric({ rubric, providerId, model, temperature, systemOverrid
 /* ============================================================
    PERSISTENCE
    ============================================================ */
+function rubricsForStorage() {
+  return App.rubrics
+    .filter(r => r._user && !r._source)
+    .map(r => {
+      // NIAH: store recipe only (haystacks are MB-scale; rebuild tests on load)
+      if (r._niah && r._niahRecipe) {
+        return {
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          _user: true,
+          _niah: true,
+          _niahRecipe: r._niahRecipe,
+        };
+      }
+      if (r._niah) return null; // legacy full-prompt NIAH — omit from storage
+      return r;
+    })
+    .filter(Boolean);
+}
+
+function restoreUserRubrics(saved) {
+  return (saved || []).flatMap(r => {
+    if (r._niah && r._niahRecipe) {
+      const built = Niah.buildRubric(r._niahRecipe);
+      return [{
+        ...built,
+        id: r.id || built.id,
+        name: r.name ?? built.name,
+        description: r.description ?? built.description,
+      }];
+    }
+    // Drop legacy NIAH blobs that filled localStorage with full haystacks
+    if (r._niah || r.tests?.[0]?._meta?.type === 'niah') return [];
+    return [r];
+  });
+}
+
 function persist() {
   App.storage.save({
     config: App.config,
     history: App.history.slice(0, 100),
-    rubrics: App.rubrics.filter(r => r._user && !r._source), // user-pasted only; folder-sourced re-load from disk
+    rubrics: rubricsForStorage(),
     pricing: Pricing.serialize(),
   });
 }
@@ -1871,7 +1912,7 @@ function restore() {
   const s = App.storage.load();
   App.config = s.config || {};
   App.history = s.history || [];
-  const userRubrics = s.rubrics || [];
+  const userRubrics = restoreUserRubrics(s.rubrics);
   const userIds = new Set(userRubrics.map(r => r.id));
   // User-edited versions override seeded samples with the same id
   const seedSamples = SAMPLE_RUBRICS.filter(r => !userIds.has(r.id));
@@ -2072,7 +2113,7 @@ const ui = {
     const r = App.rubrics.find(x => x.id === sel.value);
     const box = document.getElementById('rubric-preview');
     if (!r) { box.textContent = '(no rubric)'; return; }
-    box.innerHTML = `<strong>${r.name}</strong> · ${r.tests.length} tests<br><span class="small">${r.description || ''}</span>`;
+    box.innerHTML = `<strong>${escapeHtml(r.name)}</strong> · ${r.tests.length} tests<br><span class="small">${escapeHtml(r.description || '')}</span>`;
   },
 
   renderProviders() {
@@ -2099,8 +2140,8 @@ const ui = {
     row.className = 'run-line';
     row.innerHTML = `
       <span class="run-status ${status}">${status === 'ok' ? '✓' : status === 'fail' ? '✗' : status === 'err' ? '!' : '◯'}</span>
-      <span class="run-id">${id}</span>
-      <span class="run-detail">${detail}</span>`;
+      <span class="run-id">${escapeHtml(id)}</span>
+      <span class="run-detail">${escapeHtml(detail)}</span>`;
     stream.appendChild(row);
     stream.scrollTop = stream.scrollHeight;
   },
@@ -2111,8 +2152,8 @@ const ui = {
     if (!last) return;
     last.innerHTML = `
       <span class="run-status ${status}">${status === 'ok' ? '✓' : status === 'fail' ? '✗' : status === 'err' ? '!' : '◯'}</span>
-      <span class="run-id">${id}</span>
-      <span class="run-detail" title="${detail.replace(/"/g,'&quot;')}">${detail}</span>`;
+      <span class="run-id">${escapeHtml(id)}</span>
+      <span class="run-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>`;
   },
 
   clearStream() { document.getElementById('run-stream').innerHTML = ''; },
@@ -2138,15 +2179,15 @@ const ui = {
       const pillCls = run.passes === run.completedTests ? 'ok' : (run.passes === 0 ? 'fail' : 'partial');
       const costStr = run.costsKnown ? fmtCost(run.totalCost) : (run.totalCost > 0 ? `~${fmtCost(run.totalCost)}` : '—');
       tr.innerHTML = `
-        <td class="small">${run.startedAt.replace('T',' ').slice(0,19)}</td>
-        <td>${run.rubricName}</td>
-        <td>${run.providerLabel}</td>
-        <td class="small">${run.model}</td>
+        <td class="small">${escapeHtml(run.startedAt.replace('T',' ').slice(0,19))}</td>
+        <td>${escapeHtml(run.rubricName)}</td>
+        <td>${escapeHtml(run.providerLabel)}</td>
+        <td class="small">${escapeHtml(run.model)}</td>
         <td><span class="pill ${pillCls}">${passRatio}</span></td>
         <td>${run.avgLatencyMs}</td>
         <td class="small">${(run.promptTokens||0)+'/'+(run.completionTokens||0)}</td>
-        <td class="small">${costStr}</td>
-        <td><button class="ghost" style="padding:2px 8px;font-size:10px;" data-toggle="${run.runId}">DETAIL</button></td>
+        <td class="small">${escapeHtml(costStr)}</td>
+        <td><button class="ghost" style="padding:2px 8px;font-size:10px;" data-toggle="${escapeHtml(run.runId)}">DETAIL</button></td>
       `;
       body.appendChild(tr);
 
@@ -2159,8 +2200,8 @@ const ui = {
           <div class="test-row">
             <span class="pill ${t.pass ? 'ok':'fail'}">${t.pass?'PASS':'FAIL'}</span>
             <div>
-              <div><strong>${t.testId}</strong> · <span class="small">${t.grader}</span>${t.searchResults ? ` · <span class="small">🔍 ${t.searchResults.length} results</span>` : ''}${t.searchError ? ` · <span class="small" style="color:var(--fail);">search err: ${escapeHtml(t.searchError)}</span>` : ''}</div>
-              <div class="small">${t.reason}</div>
+              <div><strong>${escapeHtml(t.testId)}</strong> · <span class="small">${escapeHtml(t.grader)}</span>${t.searchResults ? ` · <span class="small">🔍 ${t.searchResults.length} results</span>` : ''}${t.searchError ? ` · <span class="small" style="color:var(--fail);">search err: ${escapeHtml(t.searchError)}</span>` : ''}</div>
+              <div class="small">${escapeHtml(t.reason)}</div>
               ${t.searchResults && t.searchResults.length ? `<div class="small" style="color:var(--text-faint);margin-top:2px;">${t.searchResults.slice(0,3).map(r => '↳ '+escapeHtml(r.url || r.title)).join('<br>')}</div>` : ''}
               <div class="response">${escapeHtml(t.response || '')}</div>
             </div>
@@ -2629,7 +2670,7 @@ const ui = {
       const barW = Math.max(1, Math.round(r.passRate * 60));
       tr.innerHTML = `
         <td class="rank-pos">${i + 1}</td>
-        <td><strong>${r.providerLabel}</strong> <span class="small">· ${r.model}</span></td>
+        <td><strong>${escapeHtml(r.providerLabel)}</strong> <span class="small">· ${escapeHtml(r.model)}</span></td>
         <td>${r.runs}</td>
         <td>${r.totalTests}</td>
         <td>
@@ -2646,7 +2687,12 @@ const ui = {
 };
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c]));
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /* ============================================================
@@ -2824,7 +2870,7 @@ async function refreshPricing(force = false) {
     ui.renderHistory();
     ui.renderRanking();
   } catch (e) {
-    if (statusEl) statusEl.innerHTML = `<span class="status-dot fail"></span>PRICING · ${e.message}`;
+    if (statusEl) statusEl.innerHTML = `<span class="status-dot fail"></span>PRICING · ${escapeHtml(e.message)}`;
   }
 }
 
@@ -2980,7 +3026,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const rubric = Niah.buildRubric({ contextTokens, depths, needle, question, keywords, maxTokens });
-    // splice into rubrics, replacing any prior generated NIAH with same id (won't collide due to timestamp)
+    // Replace prior session NIAH rubrics (ephemeral; only recipe is persisted)
+    App.rubrics = App.rubrics.filter(r => !r._niah);
     App.rubrics.push(rubric);
     persist();
     ui.renderRubrics();
