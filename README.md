@@ -1,5 +1,7 @@
 # LLM Eval Lab
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 A **single-file, browser-based evaluation harness** for testing LLM outputs against rubrics. No install, no server — open the HTML file, add your API keys, pick a rubric, and run.
 
 Open **`llm-eval-lab.html`** in your browser (version is tracked in the app header and git tags, not the filename).
@@ -211,4 +213,11 @@ Note: custom checks registered in-console are cleared on reload unless added to 
 
 ## License
 
-No license file is included yet. Add one if you plan to distribute or accept contributions.
+Copyright © 2026 Victor Chaidez
+
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. You may use, modify, and redistribute this software under the terms of that license.
+
+- Full license text: [LICENSE](LICENSE)
+- Summary: [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
+
+If you distribute this program or a modified version, you must provide corresponding source under the same license (including any changes you make).
