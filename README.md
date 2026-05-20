@@ -155,6 +155,47 @@ Clear history with **CLEAR** in Run History. Keys are only sent to the APIs you 
 
 Append `?dev=1` to the URL to enable panel reordering (SortableJS) and a layout export button.
 
+## Self-check (regression suite)
+
+After each change, open the **SELF-CHECK** panel (bottom of the page) and click **RUN ALL CHECKS**.
+
+The suite validates offline by default (~50 checks):
+
+| Category | What it covers |
+|----------|----------------|
+| **core** | Providers, graders, rubrics, storage key |
+| **providers** | Provider contract fields |
+| **graders** | Unit smoke tests for every grader + llm-judge mock |
+| **rubrics** | Sample rubrics, unique IDs, valid grader refs |
+| **security** | `escapeHtml`, XSS-safe DOM templates |
+| **storage** | NIAH recipe persist/restore, legacy cleanup, quota |
+| **invariants** | Source-level regression guards (judge `max_tokens`, etc.) |
+| **pricing** | Cost math and formatting |
+| **ui** | Required DOM nodes, render smoke |
+| **config** | Warns if judge/search keys missing when needed |
+| **live** | Network probes (optional checkbox) |
+
+**URL shortcuts**
+
+- `?selfcheck=1` — run suite on page load
+- `?selfcheck=live` — include live network/API probes
+
+**Export** — **EXPORT JSON** saves the full report for CI or diffing across iterations.
+
+**Extend** — register custom checks from the browser console:
+
+```javascript
+SelfCheck.register({
+  id: 'my-custom-check',
+  category: 'custom',
+  label: 'My invariant',
+  run: () => SelfCheck.pass('ok'), // or fail() / warn() / skip()
+});
+// Re-run: document.getElementById('btn-selfcheck-run').click()
+```
+
+Note: custom checks registered in-console are cleared on reload unless added to `SelfCheck.initBuiltinChecks()` in the source.
+
 ## Roadmap (from in-app comments)
 
 - **v0.2** — LLM-as-judge, rubric folder loader *(in progress; UI still labeled v0.1 in places)*

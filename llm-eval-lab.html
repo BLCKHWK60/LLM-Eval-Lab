@@ -17,6 +17,7 @@
      - App.registerGrader({ id, label, grade })
      - App.registerWebSearchProvider(...)   // stub for v0.4
      - App.storage.get/set                   // localStorage today; swap later
+     - SelfCheck.register({ id, category, label, run })  // regression suite
      - Rubric JSON format documented near SAMPLE_RUBRICS
 
    ROADMAP:
@@ -149,6 +150,7 @@ main {
   #panel-ranking { grid-column: 1 / -1; }
   #panel-niah    { grid-column: 1 / -1; }
   #panel-editor  { grid-column: 1 / -1; }
+  #panel-selfcheck { grid-column: 1 / -1; }
 }
 
 /* ─────────── EDITOR ─────────── */
@@ -615,6 +617,70 @@ footer {
   right: 16px;
   z-index: 100;
 }
+
+/* ─────────── SELF-CHECK ─────────── */
+.selfcheck-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.selfcheck-summary {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.selfcheck-summary span.pass  { color: var(--ok); }
+.selfcheck-summary span.fail  { color: var(--fail); }
+.selfcheck-summary span.warn  { color: var(--warn); }
+.selfcheck-summary span.skip  { color: var(--text-faint); }
+.selfcheck-filter {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.selfcheck-filter button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.selfcheck-list {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.selfcheck-row {
+  display: grid;
+  grid-template-columns: 72px 120px 1fr auto;
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.selfcheck-row:last-child { border-bottom: none; }
+.selfcheck-row.fail { background: rgba(208, 88, 88, 0.06); }
+.selfcheck-row.warn { background: rgba(232, 168, 56, 0.06); }
+.selfcheck-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--border-strong);
+}
+.selfcheck-badge.pass { color: var(--ok); border-color: var(--ok); }
+.selfcheck-badge.fail { color: var(--fail); border-color: var(--fail); }
+.selfcheck-badge.warn { color: var(--warn); border-color: var(--warn); }
+.selfcheck-badge.skip { color: var(--text-faint); }
+.selfcheck-msg { color: var(--text-dim); word-break: break-word; }
+.selfcheck-ms { color: var(--text-faint); white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -915,6 +981,40 @@ footer {
           <tr><td colspan="8" class="small" style="padding:24px;text-align:center;">no runs yet</td></tr>
         </tbody>
       </table>
+    </div>
+  </section>
+
+  <!-- SELF-CHECK -->
+  <section class="panel" id="panel-selfcheck" data-panel-id="selfcheck">
+    <div class="panel-header">
+      <span class="panel-title">▸ SELF-CHECK</span>
+      <span class="panel-meta" id="selfcheck-meta">suite v1 · not run</span>
+    </div>
+    <div class="panel-body">
+      <div class="selfcheck-toolbar">
+        <button class="primary" id="btn-selfcheck-run">▶ RUN ALL CHECKS</button>
+        <button class="ghost" id="btn-selfcheck-export" disabled>EXPORT JSON</button>
+        <label class="small" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="selfcheck-live" />
+          include live probes (network / configured APIs)
+        </label>
+        <span class="small" style="color:var(--text-faint);">Add checks via <code>SelfCheck.register()</code> — runs offline by default</span>
+      </div>
+      <div class="selfcheck-summary" id="selfcheck-summary">
+        <span class="pass">pass 0</span>
+        <span class="fail">fail 0</span>
+        <span class="warn">warn 0</span>
+        <span class="skip">skip 0</span>
+      </div>
+      <div class="selfcheck-filter" id="selfcheck-filter">
+        <button class="ghost active" data-filter="all">ALL</button>
+        <button class="ghost" data-filter="fail">FAIL</button>
+        <button class="ghost" data-filter="warn">WARN</button>
+        <button class="ghost" data-filter="pass">PASS</button>
+      </div>
+      <div class="selfcheck-list" id="selfcheck-list">
+        <div class="small" style="padding:24px;text-align:center;color:var(--text-faint);">Click RUN ALL CHECKS to validate the harness after each change.</div>
+      </div>
     </div>
   </section>
 
@@ -2696,6 +2796,749 @@ function escapeHtml(s) {
 }
 
 /* ============================================================
+   SELF-CHECK — extensible regression / invariant suite.
+   Run after each iteration. Register more checks anytime:
+     SelfCheck.register({ id, category, label, live?, run(ctx) })
+   run() returns { status: 'pass'|'fail'|'warn'|'skip', message }
+   ============================================================ */
+const SelfCheck = {
+  SUITE_VERSION: '1.0.0',
+  checks: [],
+  lastResults: null,
+  filter: 'all',
+
+  register(check) {
+    if (!check.id || !check.run) throw new Error('SelfCheck.register requires id + run');
+    this.checks.push({
+      category: check.category || 'misc',
+      label: check.label || check.id,
+      live: !!check.live,
+      ...check,
+    });
+  },
+
+  result(status, message) {
+    return { status, message: message || '' };
+  },
+
+  pass(msg) { return this.result('pass', msg); },
+  fail(msg) { return this.result('fail', msg); },
+  warn(msg) { return this.result('warn', msg); },
+  skip(msg) { return this.result('skip', msg); },
+
+  async runAll({ live = false } = {}) {
+    const started = performance.now();
+    const results = [];
+    for (const check of this.checks) {
+      if (check.live && !live) {
+        results.push({
+          id: check.id, category: check.category, label: check.label,
+          status: 'skip', message: 'live probe disabled (enable checkbox)', ms: 0,
+        });
+        continue;
+      }
+      const t0 = performance.now();
+      try {
+        const out = await check.run({ live });
+        const status = out?.status || 'fail';
+        const message = out?.message ?? '(no message)';
+        if (!['pass', 'fail', 'warn', 'skip'].includes(status)) {
+          results.push({
+            id: check.id, category: check.category, label: check.label,
+            status: 'fail', message: `invalid status "${status}"`, ms: Math.round(performance.now() - t0),
+          });
+        } else {
+          results.push({
+            id: check.id, category: check.category, label: check.label,
+            status, message, ms: Math.round(performance.now() - t0),
+          });
+        }
+      } catch (e) {
+        results.push({
+          id: check.id, category: check.category, label: check.label,
+          status: 'fail', message: `threw: ${e.message}`, ms: Math.round(performance.now() - t0),
+        });
+      }
+    }
+    this.lastResults = {
+      suiteVersion: this.SUITE_VERSION,
+      at: new Date().toISOString(),
+      live,
+      durationMs: Math.round(performance.now() - started),
+      results,
+      counts: results.reduce((acc, r) => (acc[r.status] = (acc[r.status] || 0) + 1, acc), {}),
+    };
+    this.render();
+    return this.lastResults;
+  },
+
+  render() {
+    const res = this.lastResults;
+    const meta = document.getElementById('selfcheck-meta');
+    const summary = document.getElementById('selfcheck-summary');
+    const list = document.getElementById('selfcheck-list');
+    const exportBtn = document.getElementById('btn-selfcheck-export');
+    if (!meta || !summary || !list) return;
+
+    if (!res) {
+      meta.textContent = `suite v${this.SUITE_VERSION} · not run`;
+      return;
+    }
+
+    const c = res.counts || {};
+    const failN = c.fail || 0;
+    meta.textContent = `suite v${this.SUITE_VERSION} · ${res.durationMs}ms · ${failN ? 'ISSUES FOUND' : 'all clear'}`;
+    summary.innerHTML = `
+      <span class="pass">pass ${c.pass || 0}</span>
+      <span class="fail">fail ${c.fail || 0}</span>
+      <span class="warn">warn ${c.warn || 0}</span>
+      <span class="skip">skip ${c.skip || 0}</span>`;
+
+    const filtered = res.results.filter(r => this.filter === 'all' || r.status === this.filter);
+    if (!filtered.length) {
+      list.innerHTML = `<div class="small" style="padding:24px;text-align:center;color:var(--text-faint);">No checks match filter "${this.filter}".</div>`;
+    } else {
+      list.innerHTML = filtered.map(r => `
+        <div class="selfcheck-row ${r.status}">
+          <span class="selfcheck-badge ${r.status}">${r.status}</span>
+          <span class="small">${escapeHtml(r.category)}</span>
+          <div>
+            <div><strong>${escapeHtml(r.label)}</strong> <span class="small" style="color:var(--text-faint);">${escapeHtml(r.id)}</span></div>
+            <div class="selfcheck-msg">${escapeHtml(r.message)}</div>
+          </div>
+          <span class="selfcheck-ms">${r.ms}ms</span>
+        </div>`).join('');
+    }
+    if (exportBtn) exportBtn.disabled = false;
+  },
+
+  exportJson() {
+    if (!this.lastResults) return;
+    const blob = new Blob([JSON.stringify(this.lastResults, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `llm-eval-selfcheck-${Date.now()}.json`;
+    a.click();
+  },
+
+  initBuiltinChecks() {
+    this.checks = [];
+
+    // ── CORE ─────────────────────────────────────────────────
+    this.register({
+      id: 'core-providers',
+      category: 'core',
+      label: 'Providers registered',
+      run: () => App.providers.size >= 2
+        ? this.pass(`${App.providers.size} providers: ${[...App.providers.keys()].join(', ')}`)
+        : this.fail(`expected ≥2 providers, got ${App.providers.size}`),
+    });
+
+    this.register({
+      id: 'core-graders',
+      category: 'core',
+      label: 'Graders registered',
+      run: () => App.graders.size >= 8
+        ? this.pass(`${App.graders.size} graders`)
+        : this.fail(`expected ≥8 graders, got ${App.graders.size}`),
+    });
+
+    this.register({
+      id: 'core-search-providers',
+      category: 'core',
+      label: 'Search providers registered',
+      run: () => App.searchProviders.size >= 2
+        ? this.pass(`${App.searchProviders.size} search providers`)
+        : this.fail(`expected ≥2 search providers, got ${App.searchProviders.size}`),
+    });
+
+    this.register({
+      id: 'core-sample-rubrics',
+      category: 'core',
+      label: 'Built-in rubrics loaded',
+      run: () => SAMPLE_RUBRICS.length >= 5
+        ? this.pass(`${SAMPLE_RUBRICS.length} samples + ${App.rubrics.length} total rubrics`)
+        : this.fail('SAMPLE_RUBRICS missing or empty'),
+    });
+
+    this.register({
+      id: 'core-storage-key',
+      category: 'core',
+      label: 'Storage key defined',
+      run: () => App.storage?.KEY
+        ? this.pass(`key: ${App.storage.KEY}`)
+        : this.fail('App.storage.KEY missing'),
+    });
+
+    // ── PROVIDER CONTRACTS ───────────────────────────────────
+    for (const p of App.providers.values()) {
+      this.register({
+        id: `provider-contract-${p.id}`,
+        category: 'providers',
+        label: `Provider contract: ${p.label}`,
+        run: () => {
+          const missing = [];
+          if (!p.id) missing.push('id');
+          if (!p.label) missing.push('label');
+          if (typeof p.call !== 'function') missing.push('call()');
+          if (!Array.isArray(p.configFields)) missing.push('configFields[]');
+          if (missing.length) return this.fail(`missing: ${missing.join(', ')}`);
+          return this.pass('id, label, call, configFields OK');
+        },
+      });
+    }
+
+    // ── GRADER UNIT TESTS ────────────────────────────────────
+    const graderCases = [
+      { id: 'exact', fn: g => g.grade('Hello', 'hello', { caseSensitive: false }), expectPass: true },
+      { id: 'contains', fn: g => g.grade('foo bar baz', ['foo', 'baz'], { mode: 'all' }), expectPass: true },
+      { id: 'contains-any', fn: g => g.grade('zzz', ['aaa', 'bbb'], { mode: 'any' }), expectPass: false },
+      { id: 'regex', fn: g => g.grade('abc123', '^abc\\d+', {}), expectPass: true },
+      { id: 'starts-with', fn: g => g.grade('Yes, indeed', 'yes', { caseSensitive: false }), expectPass: true },
+      { id: 'numeric', fn: g => g.grade('≈ 3.14 rad', '3.14', { tolerance: 0.01 }), expectPass: true },
+      { id: 'json-equal', fn: g => g.grade('{"a":1,"b":2}', { b: 2, a: 1 }), expectPass: true },
+      { id: 'length', fn: g => g.grade('hello', null, { min: 3, max: 10 }), expectPass: true },
+    ];
+
+    for (const tc of graderCases) {
+      this.register({
+        id: `grader-${tc.id}`,
+        category: 'graders',
+        label: `Grader smoke: ${tc.id}`,
+        run: () => {
+          const g = App.graders.get(tc.id.replace('-any', ''));
+          if (!g) return this.fail(`grader "${tc.id}" not found`);
+          const r = tc.fn(g);
+          if (!r || typeof r.pass !== 'boolean') return this.fail('grader returned invalid shape');
+          if (r.pass !== tc.expectPass) return this.fail(`expected pass=${tc.expectPass}, got ${r.pass} (${r.reason})`);
+          return this.pass(r.reason || 'ok');
+        },
+      });
+    }
+
+    this.register({
+      id: 'grader-llm-judge-no-criteria',
+      category: 'graders',
+      label: 'LLM judge rejects missing criteria',
+      run: async () => {
+        const g = App.graders.get('llm-judge');
+        const r = await g.grade('answer', null, {}, {});
+        return r.pass === false && r.reason.includes('criteria')
+          ? this.pass(r.reason)
+          : this.fail(`expected criteria failure, got: ${r.reason}`);
+      },
+    });
+
+    this.register({
+      id: 'grader-llm-judge-mock',
+      category: 'graders',
+      label: 'LLM judge parses mock response',
+      run: async () => {
+        const g = App.graders.get('llm-judge');
+        const r = await g.grade('good answer', null, { criteria: 'must be good', threshold: 0.7 }, {
+          prompt: 'test',
+          callJudge: async () => '{"pass": true, "score": 0.9, "reason": "looks good"}',
+        });
+        return r.pass && r.score >= 0.7
+          ? this.pass(r.reason)
+          : this.fail(`mock judge failed: ${r.reason}`);
+      },
+    });
+
+    this.register({
+      id: 'grader-regex-invalid',
+      category: 'graders',
+      label: 'Regex grader handles bad pattern',
+      run: () => {
+        const g = App.graders.get('regex');
+        const r = g.grade('x', '[invalid', {});
+        return r.pass === false && r.reason.includes('bad regex')
+          ? this.pass(r.reason)
+          : this.fail('expected bad regex handling');
+      },
+    });
+
+    // ── RUBRIC VALIDATION ────────────────────────────────────
+    this.register({
+      id: 'rubrics-unique-ids',
+      category: 'rubrics',
+      label: 'Rubric IDs unique',
+      run: () => {
+        const ids = App.rubrics.map(r => r.id);
+        const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+        return dupes.length
+          ? this.fail(`duplicate ids: ${[...new Set(dupes)].join(', ')}`)
+          : this.pass(`${ids.length} unique ids`);
+      },
+    });
+
+    this.register({
+      id: 'rubrics-grader-refs',
+      category: 'rubrics',
+      label: 'All tests reference valid graders',
+      run: () => {
+        const bad = [];
+        for (const r of App.rubrics) {
+          for (const t of r.tests || []) {
+            if (!App.graders.has(t.grader)) bad.push(`${r.id}/${t.id} → ${t.grader}`);
+          }
+        }
+        return bad.length
+          ? this.fail(`${bad.length} invalid: ${bad.slice(0, 5).join('; ')}${bad.length > 5 ? '…' : ''}`)
+          : this.pass('all grader ids resolve');
+      },
+    });
+
+    for (const r of SAMPLE_RUBRICS) {
+      this.register({
+        id: `rubric-sample-${r.id}`,
+        category: 'rubrics',
+        label: `Sample rubric: ${r.name}`,
+        run: () => {
+          if (!r.id || !r.name || !Array.isArray(r.tests) || !r.tests.length) {
+            return this.fail('missing id, name, or tests[]');
+          }
+          for (const t of r.tests) {
+            if (!t.id || !t.prompt || !t.grader) return this.fail(`test missing id/prompt/grader`);
+          }
+          return this.pass(`${r.tests.length} tests`);
+        },
+      });
+    }
+
+    // ── SECURITY / XSS ───────────────────────────────────────
+    this.register({
+      id: 'security-escape-html',
+      category: 'security',
+      label: 'escapeHtml neutralizes HTML',
+      run: () => {
+        const payload = `<img src=x onerror="alert(1)"><script>alert(1)</script>"'&`;
+        const out = escapeHtml(payload);
+        if (out.includes('<img') || out.includes('<script') || !out.includes('&lt;') || !out.includes('&quot;')) {
+          return this.fail(`unsafe output: ${out.slice(0, 80)}`);
+        }
+        return this.pass('&, <, >, ", \' escaped');
+      },
+    });
+
+    this.register({
+      id: 'security-preview-dom',
+      category: 'security',
+      label: 'Rubric preview does not execute HTML',
+      run: () => {
+        const payload = '<img id="selfcheck-xss-probe" src=x onerror="window.__selfcheckXss=1">';
+        const box = document.createElement('div');
+        box.innerHTML = `<strong>${escapeHtml(payload)}</strong>`;
+        if (box.querySelector('#selfcheck-xss-probe')) return this.fail('HTML executed in preview pattern');
+        return this.pass('preview template safe');
+      },
+    });
+
+    this.register({
+      id: 'security-stream-dom',
+      category: 'security',
+      label: 'Run stream does not execute HTML',
+      run: () => {
+        const detail = '<img id="selfcheck-stream-probe" src=x>';
+        const row = document.createElement('div');
+        row.innerHTML = `<span class="run-detail">${escapeHtml(detail)}</span>`;
+        if (row.querySelector('#selfcheck-stream-probe')) return this.fail('HTML executed in stream pattern');
+        return this.pass('stream template safe');
+      },
+    });
+
+    this.register({
+      id: 'security-history-reason',
+      category: 'security',
+      label: 'History detail escapes reason text',
+      run: () => {
+        const reason = '<script>alert(1)</script>';
+        const html = `<div class="small">${escapeHtml(reason)}</div>`;
+        const box = document.createElement('div');
+        box.innerHTML = html;
+        if (box.querySelector('script')) return this.fail('script tag in history reason');
+        return this.pass('reason template safe');
+      },
+    });
+
+    // ── NIAH & STORAGE ───────────────────────────────────────
+    this.register({
+      id: 'niah-recipe-attached',
+      category: 'storage',
+      label: 'NIAH build attaches compact recipe',
+      run: () => {
+        const r = Niah.buildRubric({
+          contextTokens: 2000, depths: [25, 75], needle: 'NEEDLE_X', question: 'Q?', keywords: ['NEEDLE'],
+          maxTokens: 50, seed: 42,
+        });
+        if (!r._niah || !r._niahRecipe) return this.fail('missing _niah / _niahRecipe');
+        if (r.tests.length !== 2) return this.fail(`expected 2 tests, got ${r.tests.length}`);
+        return this.pass(`recipe keys: ${Object.keys(r._niahRecipe).join(', ')}`);
+      },
+    });
+
+    this.register({
+      id: 'niah-persist-compact',
+      category: 'storage',
+      label: 'NIAH persists recipe only (no haystack)',
+      run: () => {
+        const r = Niah.buildRubric({
+          contextTokens: 8000, depths: [10, 50, 90], needle: 'SECRET99', question: 'Find it?', keywords: ['SECRET'],
+          maxTokens: 80, seed: 7,
+        });
+        const prior = App.rubrics.length;
+        App.rubrics.push(r);
+        const stored = rubricsForStorage().filter(x => x._niah);
+        App.rubrics.length = prior;
+        if (!stored.length) return this.fail('no NIAH entry in rubricsForStorage()');
+        const blob = JSON.stringify(stored[0]);
+        if (stored[0].tests) return this.fail('tests[] should not be persisted');
+        if (blob.includes('Section 1') || blob.includes('universally acknowledged')) {
+          return this.fail('haystack filler leaked into storage blob');
+        }
+        if (blob.length > 4000) return this.fail(`storage blob too large (${blob.length} chars)`);
+        return this.pass(`compact blob ${blob.length} chars`);
+      },
+    });
+
+    this.register({
+      id: 'niah-restore-roundtrip',
+      category: 'storage',
+      label: 'NIAH restore rebuilds full prompts',
+      run: () => {
+        const recipe = {
+          contextTokens: 3000, depths: [50], needle: 'ROUNDTRIP', question: 'Where?', keywords: ['ROUNDTRIP'],
+          maxTokens: 60, seed: 99,
+        };
+        const built = Niah.buildRubric(recipe);
+        const stored = {
+          id: 'niah_test_restore', name: built.name, description: built.description,
+          _user: true, _niah: true, _niahRecipe: built._niahRecipe,
+        };
+        const restored = restoreUserRubrics([stored]);
+        if (!restored.length) return this.fail('restoreUserRubrics returned empty');
+        const prompt = restored[0].tests?.[0]?.prompt || '';
+        if (prompt.length < 500) return this.fail(`prompt too short (${prompt.length}) — haystack not rebuilt`);
+        if (!prompt.includes('ROUNDTRIP')) return this.fail('needle missing from rebuilt prompt');
+        return this.pass(`rebuilt prompt ${prompt.length} chars`);
+      },
+    });
+
+    this.register({
+      id: 'niah-deterministic',
+      category: 'storage',
+      label: 'NIAH haystack is deterministic (seeded)',
+      run: () => {
+        const a = Niah.buildHaystack(5000, 1234);
+        const b = Niah.buildHaystack(5000, 1234);
+        return a === b ? this.pass('same seed → same haystack') : this.fail('haystack differs for same seed');
+      },
+    });
+
+    this.register({
+      id: 'storage-legacy-niah-stripped',
+      category: 'storage',
+      label: 'Legacy bloated NIAH omitted on restore',
+      run: () => {
+        const legacy = {
+          id: 'legacy_niah', name: 'Legacy', _user: true, _niah: true,
+          tests: [{ id: 't1', prompt: 'x'.repeat(50000), grader: 'exact', expected: 'y', _meta: { type: 'niah' } }],
+        };
+        const out = restoreUserRubrics([legacy]);
+        return out.length === 0
+          ? this.pass('legacy blob dropped')
+          : this.fail(`legacy restored ${out.length} rubric(s)`);
+      },
+    });
+
+    this.register({
+      id: 'storage-local-no-haystack',
+      category: 'storage',
+      label: 'localStorage rubrics contain no haystack text',
+      run: () => {
+        const raw = localStorage.getItem(App.storage.KEY);
+        if (!raw) return this.pass('no storage yet (fresh)');
+        if (raw.includes('universally acknowledged') || raw.includes('Section 1 —')) {
+          return this.fail('NIAH filler detected in localStorage — clear storage or re-persist');
+        }
+        let data;
+        try { data = JSON.parse(raw); } catch { return this.fail('localStorage JSON corrupt'); }
+        for (const r of data.rubrics || []) {
+          if (r.tests?.some(t => (t.prompt?.length || 0) > 20000)) {
+            return this.fail(`rubric "${r.id}" has oversized prompt in storage`);
+          }
+        }
+        return this.pass(`storage ${raw.length} chars — no haystack markers`);
+      },
+    });
+
+    this.register({
+      id: 'storage-quota-headroom',
+      category: 'storage',
+      label: 'localStorage under 4MB',
+      run: () => {
+        const raw = localStorage.getItem(App.storage.KEY) || '';
+        if (raw.length > 4_000_000) return this.fail(`${raw.length} chars — approaching quota`);
+        if (raw.length > 2_000_000) return this.warn(`${raw.length} chars — monitor size`);
+        return this.pass(`${raw.length} chars`);
+      },
+    });
+
+    this.register({
+      id: 'storage-history-cap',
+      category: 'storage',
+      label: 'History capped at 100 runs on persist',
+      run: () => {
+        const src = persist.toString();
+        return src.includes('slice(0, 100)')
+          ? this.pass('persist() slices history to 100')
+          : this.fail('history cap missing in persist()');
+      },
+    });
+
+    // ── CODE INVARIANTS (regression guards) ──────────────────
+    this.register({
+      id: 'invariant-judge-max-tokens',
+      category: 'invariants',
+      label: 'Judge calls default max_tokens 256',
+      run: () => {
+        const src = runRubric.toString();
+        return src.includes('max_tokens: jc.max_tokens ?? 256')
+          ? this.pass('found in runRubric → callJudge')
+          : this.fail('max_tokens cap missing from judge path');
+      },
+    });
+
+    this.register({
+      id: 'invariant-rubrics-for-storage',
+      category: 'invariants',
+      label: 'rubricsForStorage() exists and filters NIAH',
+      run: () => {
+        if (typeof rubricsForStorage !== 'function') return this.fail('rubricsForStorage missing');
+        const src = rubricsForStorage.toString();
+        if (!src.includes('_niahRecipe')) return this.fail('_niahRecipe path missing');
+        return this.pass('compact NIAH persistence present');
+      },
+    });
+
+    this.register({
+      id: 'invariant-restore-user-rubrics',
+      category: 'invariants',
+      label: 'restoreUserRubrics() drops legacy NIAH',
+      run: () => {
+        if (typeof restoreUserRubrics !== 'function') return this.fail('restoreUserRubrics missing');
+        const src = restoreUserRubrics.toString();
+        return src.includes('_meta?.type === \'niah\'')
+          ? this.pass('legacy NIAH filter present')
+          : this.fail('legacy filter missing');
+      },
+    });
+
+    // ── PRICING ──────────────────────────────────────────────
+    this.register({
+      id: 'pricing-lmstudio-free',
+      category: 'pricing',
+      label: 'LM Studio cost is zero',
+      run: () => {
+        const p = Pricing.get('lmstudio', 'any');
+        return p && p.input === 0 && p.output === 0
+          ? this.pass('$0 input/output')
+          : this.fail(JSON.stringify(p));
+      },
+    });
+
+    this.register({
+      id: 'pricing-compute-null',
+      category: 'pricing',
+      label: 'computeCost handles missing usage',
+      run: () => {
+        const c = Pricing.computeCost('openrouter', 'openai/gpt-4o', null);
+        return c === null ? this.pass('null usage → null cost') : this.fail(String(c));
+      },
+    });
+
+    this.register({
+      id: 'pricing-fmt-cost',
+      category: 'pricing',
+      label: 'fmtCost formats edge cases',
+      run: () => {
+        if (fmtCost(null) !== '—') return this.fail('null');
+        if (fmtCost(0) !== '$0') return this.fail('zero');
+        if (!fmtCost(0.00001).startsWith('$')) return this.fail('tiny');
+        return this.pass('null, 0, tiny OK');
+      },
+    });
+
+    // ── UI / DOM ─────────────────────────────────────────────
+    const requiredDom = [
+      'panel-grid', 'sel-rubric', 'sel-provider', 'inp-model', 'btn-run', 'btn-cancel',
+      'settings-body', 'run-stream', 'history-body', 'ranking-body', 'btn-niah-generate',
+      'sel-edit-rubric', 'btn-selfcheck-run', 'selfcheck-list',
+    ];
+
+    this.register({
+      id: 'ui-required-dom',
+      category: 'ui',
+      label: 'Required DOM elements present',
+      run: () => {
+        const missing = requiredDom.filter(id => !document.getElementById(id));
+        return missing.length
+          ? this.fail(`missing: ${missing.join(', ')}`)
+          : this.pass(`${requiredDom.length} elements found`);
+      },
+    });
+
+    this.register({
+      id: 'ui-render-smoke',
+      category: 'ui',
+      label: 'Core render functions run without throw',
+      run: () => {
+        try {
+          ui.renderRubrics();
+          ui.renderProviders();
+          ui.renderHistory();
+          ui.renderRanking();
+          ui.renderNiah();
+          return this.pass('renderRubrics/Providers/History/Ranking/Niah OK');
+        } catch (e) {
+          return this.fail(e.message);
+        }
+      },
+    });
+
+    // ── SEARCH HELPER ────────────────────────────────────────
+    this.register({
+      id: 'search-pick-provider-none',
+      category: 'search',
+      label: 'pickSearchProvider with no keys',
+      run: () => {
+        const saved = App.config.__searchProviders;
+        App.config.__searchProviders = {};
+        const p = pickSearchProvider('tavily');
+        App.config.__searchProviders = saved;
+        return p === null ? this.pass('returns null when unconfigured') : this.fail('expected null');
+      },
+    });
+
+    // ── INDEXEDDB ────────────────────────────────────────────
+    this.register({
+      id: 'idb-open',
+      category: 'idb',
+      label: 'IndexedDB wrapper opens',
+      run: async () => {
+        const db = await idb.open();
+        return db ? this.pass('llm-eval-lab DB open') : this.fail('open returned falsy');
+      },
+    });
+
+    // ── CONFIG WARNINGS (non-fatal) ───────────────────────────
+    this.register({
+      id: 'config-judge-for-judged-rubric',
+      category: 'config',
+      label: 'Judge configured when judged rubrics exist',
+      run: () => {
+        const needsJudge = App.rubrics.some(r => r.tests?.some(t => t.grader === 'llm-judge'));
+        if (!needsJudge) return this.pass('no llm-judge tests loaded');
+        const jc = App.config.__judge || {};
+        if (jc.providerId && jc.model) return this.pass(`judge: ${jc.providerId} / ${jc.model}`);
+        return this.warn('llm-judge tests present but judge provider/model not set');
+      },
+    });
+
+    this.register({
+      id: 'config-search-for-search-rubric',
+      category: 'config',
+      label: 'Search provider configured for search tests',
+      run: () => {
+        const needsSearch = App.rubrics.some(r => r.tests?.some(t => t.search));
+        if (!needsSearch) return this.pass('no search tests loaded');
+        const hasKey = [...App.searchProviders.keys()].some(id => {
+          const cfg = (App.config.__searchProviders || {})[id] || {};
+          return !!cfg.apiKey;
+        });
+        return hasKey
+          ? this.pass('search API key configured')
+          : this.warn('search tests present but no search API key');
+      },
+    });
+
+    this.register({
+      id: 'config-openrouter-key',
+      category: 'config',
+      label: 'OpenRouter API key present',
+      run: () => {
+        const key = App.config.openrouter?.apiKey;
+        return key ? this.pass('key set') : this.warn('OpenRouter key not set — live runs will fail');
+      },
+    });
+
+    // ── LIVE PROBES (optional) ───────────────────────────────
+    this.register({
+      id: 'live-openrouter-models',
+      category: 'live',
+      label: 'OpenRouter public models endpoint',
+      live: true,
+      run: async () => {
+        const res = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return this.fail(`HTTP ${res.status}`);
+        const data = await res.json();
+        const n = data.data?.length || 0;
+        return n > 10 ? this.pass(`${n} models`) : this.fail('unexpected response shape');
+      },
+    });
+
+    this.register({
+      id: 'live-lmstudio',
+      category: 'live',
+      label: 'LM Studio reachable',
+      live: true,
+      run: async () => {
+        const base = (App.config.lmstudio?.baseUrl || 'http://localhost:1234').replace(/\/$/, '');
+        try {
+          const res = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(2000) });
+          if (!res.ok) return this.fail(`HTTP ${res.status} at ${base}`);
+          const data = await res.json();
+          return this.pass(`${data.data?.length || 0} model(s) at ${base}`);
+        } catch (e) {
+          return this.warn(`unreachable (${base}): ${e.message}`);
+        }
+      },
+    });
+
+    this.register({
+      id: 'live-pricing-fetch',
+      category: 'live',
+      label: 'Pricing refresh works',
+      live: true,
+      run: async () => {
+        const before = Object.keys(Pricing.data.openrouter?.models || {}).length;
+        await Pricing.fetchOpenRouter();
+        const after = Object.keys(Pricing.data.openrouter?.models || {}).length;
+        return after > 0 ? this.pass(`${after} models cached (was ${before})`) : this.fail('no models cached');
+      },
+    });
+
+    this.register({
+      id: 'live-openrouter-key-valid',
+      category: 'live',
+      label: 'OpenRouter key smoke (models auth)',
+      live: true,
+      run: async () => {
+        const key = App.config.openrouter?.apiKey;
+        if (!key) return this.skip('no OpenRouter key');
+        const res = await fetch('https://openrouter.ai/api/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.status === 401 || res.status === 403) return this.fail(`HTTP ${res.status} — invalid key`);
+        if (!res.ok) return this.fail(`HTTP ${res.status}`);
+        return this.pass('key accepted');
+      },
+    });
+  },
+};
+
+/* ============================================================
    RUBRIC FOLDER LOADING (File System Access API)
    ============================================================ */
 async function pickRubricFolder() {
@@ -3075,10 +3918,47 @@ document.addEventListener('DOMContentLoaded', () => {
   // attempt to restore previously-picked folder (no-op if none)
   restoreFolderIfAny();
 
+  /* ── SELF-CHECK ─────────────────────────────────────────── */
+  SelfCheck.initBuiltinChecks();
+  window.SelfCheck = SelfCheck; // console: SelfCheck.register({ id, category, label, run })
+
+  document.getElementById('btn-selfcheck-run').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-selfcheck-run');
+    btn.disabled = true;
+    btn.textContent = '… RUNNING';
+    try {
+      const live = document.getElementById('selfcheck-live').checked;
+      const report = await SelfCheck.runAll({ live });
+      const fails = report.counts.fail || 0;
+      ui.streamLine(fails ? 'fail' : 'ok', 'selfcheck',
+        `${report.results.length} checks · ${fails} fail · ${report.counts.warn || 0} warn · ${report.durationMs}ms`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ RUN ALL CHECKS';
+    }
+  });
+
+  document.getElementById('btn-selfcheck-export').addEventListener('click', () => SelfCheck.exportJson());
+
+  document.getElementById('selfcheck-filter').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-filter]');
+    if (!btn) return;
+    SelfCheck.filter = btn.dataset.filter;
+    document.querySelectorAll('#selfcheck-filter [data-filter]').forEach(b => b.classList.toggle('active', b === btn));
+    SelfCheck.render();
+  });
+
   /* ── DEV MODE ────────────────────────────────────────────
      ?dev=1 enables panel reorder via SortableJS + copy-layout button.
+     ?selfcheck=1 runs the self-check suite on load.
+     ?selfcheck=live includes network / API probes.
      ─────────────────────────────────────────────────────── */
   const params = new URLSearchParams(window.location.search);
+  if (params.get('selfcheck') === '1' || params.get('selfcheck') === 'live') {
+    const live = params.get('selfcheck') === 'live';
+    if (live) document.getElementById('selfcheck-live').checked = true;
+    setTimeout(() => document.getElementById('btn-selfcheck-run').click(), 300);
+  }
   if (params.get('dev') === '1') {
     document.body.classList.add('dev');
     const s = document.createElement('script');
