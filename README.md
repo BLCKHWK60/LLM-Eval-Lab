@@ -2,7 +2,7 @@
 
 A **single-file, browser-based evaluation harness** for testing LLM outputs against rubrics. No install, no server — open the HTML file, add your API keys, pick a rubric, and run.
 
-Current release: **`llm-eval-lab-v0.2.0.html`**
+Open **`llm-eval-lab.html`** in your browser (version is tracked in the app header and git tags, not the filename).
 
 ## What it does
 
@@ -21,7 +21,7 @@ Everything runs locally in your browser. API keys are stored in `localStorage` o
 ## Quick start
 
 1. Clone or download this repo.
-2. Open `llm-eval-lab-v0.2.0.html` in a modern browser (Chrome, Edge, or Firefox recommended for folder loading).
+2. Open `llm-eval-lab.html` in a modern browser (Chrome, Edge, or Firefox recommended for folder loading).
 3. In **PROVIDERS**, enter your API key(s):
    - **OpenRouter** — access many hosted models via one key
    - **LM Studio** — local OpenAI-compatible server (default `http://localhost:1234`)
