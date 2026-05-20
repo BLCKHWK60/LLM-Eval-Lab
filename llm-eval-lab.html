@@ -3120,7 +3120,7 @@ const SelfCheck = {
       category: 'security',
       label: 'escapeHtml neutralizes HTML',
       run: () => {
-        const payload = `<img src=x onerror="alert(1)"><script>alert(1)</script>"'&`;
+        const payload = `<img src=x onerror="alert(1)"><scr` + `ipt>alert(1)</scr` + `ipt>"'&`;
         const out = escapeHtml(payload);
         if (out.includes('<img') || out.includes('<script') || !out.includes('&lt;') || !out.includes('&quot;')) {
           return this.fail(`unsafe output: ${out.slice(0, 80)}`);
@@ -3160,7 +3160,7 @@ const SelfCheck = {
       category: 'security',
       label: 'History detail escapes reason text',
       run: () => {
-        const reason = '<script>alert(1)</script>';
+        const reason = '<scr' + 'ipt>alert(1)</scr' + 'ipt>';
         const html = `<div class="small">${escapeHtml(reason)}</div>`;
         const box = document.createElement('div');
         box.innerHTML = html;
